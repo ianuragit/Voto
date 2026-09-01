@@ -6,8 +6,9 @@ import { startSweeper, sweepExpiredPolls } from './services/lifecycle.js';
 async function main(): Promise<void> {
   const app = await buildServer();
 
-  // §11 — one sweep at boot (the process may have been down over a deadline),
-  // then every 60 seconds. Reads evaluate deadlines lazily regardless.
+  // §11 — one sweep at boot (the process may have been down over a deadline,
+  // or died owing voters a results email), then every 60 seconds. Reads
+  // evaluate deadlines lazily regardless.
   sweepExpiredPolls();
   const sweeper = startSweeper();
 

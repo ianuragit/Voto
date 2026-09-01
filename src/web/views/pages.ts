@@ -150,7 +150,7 @@ export function votedPage(input: { view: PollView; completed: boolean }): string
   ${
     input.completed
       ? `<p class="note good">That was the last ballot. <a href="/p/${esc(view.pollId)}">See the result</a>.</p>`
-      : `<p class="muted">You will get an email when everyone has voted. <a href="/p/${esc(
+      : `<p class="muted">When the last person votes, the final counts are emailed to everyone on the roster. <a href="/p/${esc(
           view.pollId,
         )}">Check turnout here</a> any time.</p>`
   }

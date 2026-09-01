@@ -20,6 +20,7 @@ export interface Poll {
   status: PollStatus;
   finalizedAt: string | null;
   finalBallotCount: number | null;
+  resultsNotified: boolean;
   emailsPurged: boolean;
 }
 
@@ -50,6 +51,7 @@ interface PollRow {
   status: PollStatus;
   finalized_at: string | null;
   final_ballot_count: number | null;
+  results_notified: number;
   emails_purged: number;
 }
 
@@ -75,6 +77,7 @@ function toPoll(row: PollRow): Poll {
     status: row.status,
     finalizedAt: row.finalized_at,
     finalBallotCount: row.final_ballot_count,
+    resultsNotified: row.results_notified === 1,
     emailsPurged: row.emails_purged === 1,
   };
 }
@@ -321,6 +324,32 @@ export function replaceRosterEmail(input: {
     return true;
   });
   return txn();
+}
+
+/**
+ * Claims the right to send this poll's results email, atomically. Exactly one
+ * caller ever wins, so the vote path and the sweeper cannot both mail the
+ * whole roster. Returns false if someone already claimed it.
+ */
+export function claimResultsNotification(pollId: string): boolean {
+  const res = authDb()
+    .prepare('UPDATE polls SET results_notified = 1 WHERE poll_id = ? AND results_notified = 0')
+    .run(pollId);
+  return res.changes === 1;
+}
+
+/**
+ * Polls that ended but whose voters were never told — the process died between
+ * completing the poll and sending the mail. The sweeper finishes the job.
+ */
+export function listAwaitingResultsNotification(): Poll[] {
+  const rows = authDb()
+    .prepare(
+      `SELECT * FROM polls
+        WHERE status = 'completed' AND results_notified = 0 AND emails_purged = 0`,
+    )
+    .all() as PollRow[];
+  return rows.map(toPoll);
 }
 
 /**

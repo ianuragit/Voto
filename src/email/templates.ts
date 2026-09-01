@@ -36,7 +36,7 @@ export function inviteEmail(input: InviteInput): EmailBody {
   const ballotUrl = `${config.PUBLIC_BASE_URL}/v/${input.token}`;
   const codeUrl = `${config.PUBLIC_BASE_URL}/c/${input.pollId}`;
   const pretty = formatCode(input.code);
-  const explainer = `Results stay hidden until all ${input.voterCount} of you have voted. If anyone misses the deadline, the poll fails and nobody sees anything.`;
+  const explainer = `Results stay hidden until all ${input.voterCount} of you have voted — then the final counts are emailed to everyone on this list. If anyone misses the deadline, the poll fails and nobody sees anything.`;
   const retention = `This poll and its result are deleted ${RETENTION_DAYS_AFTER_END} days after voting ends.`;
   const prefix = input.reissued ? 'Updated ballot: ' : '';
 
@@ -95,26 +95,141 @@ ${input.options.map((o) => `  <li style="margin:4px 0">${esc(o)}</li>`).join('\n
   return { subject: `${prefix}${truncate(input.question, 120)}`, html, text };
 }
 
-/** §12 Q6 — completion mail carries a link, never the numbers. */
-export function resultsReadyEmail(input: { question: string; pollId: string }): EmailBody {
+export interface ResultsEmailInput {
+  question: string;
+  options: string[];
+  pollId: string;
+  counts: number[];
+  totalBallots: number;
+  rosterSize: number;
+  deletesAt: string | null;
+}
+
+/**
+ * Sent to every voter the moment the last ballot lands: the final counts and
+ * the total ballot count, in the body.
+ *
+ * Note what this means, because it is a deliberate trade: the tally now lives
+ * in everyone's inbox permanently, outliving the 7-day deletion of the poll
+ * itself, and it can be forwarded anywhere. On a small roster a unanimous
+ * result is therefore a permanent, portable record of how every named person
+ * voted — so the mail says so when that happens rather than leaving the reader
+ * to work it out.
+ */
+export function pollResultsEmail(input: ResultsEmailInput): EmailBody {
   const url = `${config.PUBLIC_BASE_URL}/p/${input.pollId}`;
+  const top = Math.max(...input.counts);
+  const winners = input.options.filter((_, i) => input.counts[i] === top);
+  const tied = winners.length > 1;
+  const unanimous = top === input.rosterSize && input.rosterSize > 0;
+
+  const headline = tied
+    ? `It is a tie: ${winners.join(' / ')}, ${top} each.`
+    : `${winners[0]} — ${top} of ${input.totalBallots}.`;
+
+  const caveat = unanimous
+    ? `This result is unanimous, so it tells you how each of the ${input.rosterSize} of you voted. That is arithmetic, not a leak.`
+    : null;
+
+  const rows = input.options.map((option, i) => ({ option, count: input.counts[i] ?? 0 }));
+
   const text = [
-    'Everyone has voted. The result is available.',
+    'Everyone has voted. Here is the result.',
     '',
     input.question,
     '',
-    url,
+    headline,
     '',
-    'The numbers are deliberately not in this email.',
-    `The poll and its result are deleted ${RETENTION_DAYS_AFTER_END} days from now — save what you need.`,
+    'Counts:',
+    ...rows.map((r) => `  ${r.option}: ${r.count}`),
+    '',
+    `Total ballots cast: ${input.totalBallots}`,
+    `Voters invited: ${input.rosterSize}`,
+    `Integrity: PASS — every invited voter cast exactly one ballot, and no extra ballot exists.`,
+    ...(caveat ? ['', caveat] : []),
+    '',
+    `Full result: ${url}`,
+    input.deletesAt
+      ? `This poll and its result are deleted from Voto on ${formatUtc(input.deletesAt)}. This email is not deleted — keep it if you need the record.`
+      : `This poll and its result are deleted from Voto ${RETENTION_DAYS_AFTER_END} days after it ended.`,
+  ].join('\n');
+
+  const max = Math.max(top, 1);
+  const html = shell(`
+<p style="margin:0 0 4px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#888">Everyone voted</p>
+<h1 style="margin:0 0 8px;font-size:21px;line-height:1.3">${esc(input.question)}</h1>
+<p style="margin:0 0 22px;font-size:18px;font-weight:600">${esc(headline)}</p>
+${rows
+  .map(
+    (r) => `<div style="margin:0 0 12px">
+  <div style="font-size:14px"><strong>${esc(r.option)}</strong> — ${r.count}</div>
+  <div style="background:#f1efe8;border-radius:5px;height:20px;margin-top:4px">
+    <div style="background:#1a1a1a;border-radius:5px;height:20px;width:${Math.round(
+      (r.count / max) * 100,
+    )}%"></div>
+  </div>
+</div>`,
+  )
+  .join('\n')}
+<table style="width:100%;border-collapse:collapse;font-size:14px;margin:22px 0 0">
+  <tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666">Total ballots cast</td><td style="padding:7px 0;border-bottom:1px solid #eee;text-align:right"><strong>${
+    input.totalBallots
+  }</strong></td></tr>
+  <tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666">Voters invited</td><td style="padding:7px 0;border-bottom:1px solid #eee;text-align:right"><strong>${
+    input.rosterSize
+  }</strong></td></tr>
+  <tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666">Integrity</td><td style="padding:7px 0;border-bottom:1px solid #eee;text-align:right"><strong>PASS</strong></td></tr>
+</table>
+<p style="margin:14px 0 0;font-size:13px;color:#777">Every invited voter cast exactly one ballot, and no extra ballot exists.</p>
+${
+  caveat
+    ? `<p style="margin:18px 0 0;padding:13px 15px;background:#fdf5e3;border:1px solid #f0e0bb;border-radius:8px;font-size:13px;color:#8a5a00">${esc(
+        caveat,
+      )}</p>`
+    : ''
+}
+<p style="margin:22px 0 0"><a href="${esc(url)}" style="color:#1a1a1a">See it on Voto</a></p>
+<p style="margin:10px 0 0;font-size:13px;color:#777">${
+    input.deletesAt
+      ? `This poll and its result are deleted from Voto on ${esc(
+          formatUtc(input.deletesAt),
+        )}. This email is not — keep it if you need the record.`
+      : `This poll and its result are deleted from Voto ${RETENTION_DAYS_AFTER_END} days after it ended.`
+  }</p>`);
+
+  return { subject: `Result: ${truncate(input.question, 110)}`, html, text };
+}
+
+/**
+ * FR-4.5 — when the count does not reconcile, the numbers are suppressed
+ * everywhere, this email included. Voters are told why, and told nothing else.
+ */
+export function resultsWithheldEmail(input: {
+  question: string;
+  pollId: string;
+  discrepancy: string;
+}): EmailBody {
+  const url = `${config.PUBLIC_BASE_URL}/p/${input.pollId}`;
+  const text = [
+    'Everyone voted, but the result did not pass its integrity check, so no numbers are being released.',
+    '',
+    input.question,
+    '',
+    input.discrepancy,
+    '',
+    'Voto shows counts only when they are provably complete. Run the decision again.',
+    '',
+    url,
   ].join('\n');
   const html = shell(`
-<h1 style="margin:0 0 14px;font-size:20px">Everyone voted. The result is in.</h1>
-<p style="margin:0 0 18px;color:#444">${esc(input.question)}</p>
-<p style="margin:0 0 18px"><a href="${esc(url)}" style="display:inline-block;background:#1a1a1a;color:#fff;text-decoration:none;padding:12px 22px;border-radius:8px;font-weight:600">See the result</a></p>
-<p style="margin:0 0 6px;font-size:13px;color:#777">The numbers are deliberately not in this email.</p>
-<p style="margin:0;font-size:13px;color:#777">The poll and its result are deleted ${RETENTION_DAYS_AFTER_END} days from now — save what you need.</p>`);
-  return { subject: `Result: ${truncate(input.question, 110)}`, html, text };
+<h1 style="margin:0 0 14px;font-size:20px">Result withheld — integrity check failed</h1>
+<p style="margin:0 0 12px;color:#444">${esc(input.question)}</p>
+<p style="margin:0 0 12px;padding:13px 15px;background:#fdeeee;border:1px solid #f2d5d5;border-radius:8px;font-size:14px;color:#8a1c1c">${esc(
+    input.discrepancy,
+  )}</p>
+<p style="margin:0 0 18px;color:#444">Voto shows counts only when they are provably complete. Run the decision again.</p>
+<p style="margin:0"><a href="${esc(url)}" style="color:#1a1a1a">${esc(url)}</a></p>`);
+  return { subject: `Result withheld: ${truncate(input.question, 100)}`, html, text };
 }
 
 export function pollFailedEmail(input: {

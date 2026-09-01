@@ -70,13 +70,32 @@ friction. *(Nothing to implement; the absence is the decision.)*
 
 ### Q6 — Notification on completion
 
-**Decision: email every voter a link. Never the numbers.** (The PRD's proposal.)
+**Decision: email every voter the final counts and the total ballot count, in the body.**
 
-Returning to the app is worse UX than an email, and worse UX means people don't see the outcome.
-But putting counts in an email puts the decision record in inboxes, forwarded threads and mail
-provider indexes forever, where it can be quoted out of context and can't be revoked. A link
-keeps the numbers on a page with `no-store` and `noindex`. Failure and cancellation notices work
-the same way. *(`src/email/templates.ts`)*
+This reverses the PRD's proposal (and this file's earlier answer) of a link-only mail, at the
+product owner's instruction. The link is still in the mail; the numbers no longer depend on it.
+
+The cost is real and worth stating rather than burying: **the tally now lives in every voter's
+inbox permanently.** It outlives the 7-day deletion of the poll itself (Q9), it is forwardable,
+and it sits in whatever mail provider each cofounder uses, indexed. On a small roster a
+unanimous result is therefore a portable, permanent record of how every named person voted. So
+the email says exactly that when the result *is* unanimous, rather than leaving the reader to
+work it out, and the retention line tells them the email is the durable copy.
+
+Two rules from the page carry over to the mail, because a result that is only sometimes
+trustworthy is worse than one that is always withheld:
+
+- **The integrity verdict gates the numbers.** If `SUM(tallies) != consumed != roster size`, the
+  mail carries the discrepancy and no counts at all, exactly as the page does (FR-4.5).
+- **A failed poll still gets no numbers.** The deadline-failure mail reports the turnout that was
+  reached and nothing else; those counts were deleted at the moment of failure (FR-4.6).
+
+Delivery is *claimed* with an atomic `UPDATE` before sending, so the vote path and the sweeper
+can never both mail the roster, and the FR-4.7 address purge now waits for that claim — a reader
+hitting the results page first can no longer delete the roster before anyone has been told.
+A poll that completed while the process was dying is picked up by the next sweep or at boot, so
+an announcement is delayed by a restart, never lost to one.
+*(`src/services/notifications.ts`, `src/email/templates.ts`)*
 
 ### Q7 — Abstention
 

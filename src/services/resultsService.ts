@@ -1,17 +1,10 @@
 import { RETENTION_DAYS_AFTER_END } from '../domain/validation.js';
+import { summarise, type Results } from '../domain/results.js';
 import * as authRepo from '../repos/authRepo.js';
 import * as tallyRepo from '../repos/tallyRepo.js';
 import { loadPoll } from './lifecycle.js';
 
-export type Integrity = 'PASS' | 'INVALID';
-
-export interface Results {
-  counts: number[];
-  totalBallots: number;
-  rosterSize: number;
-  integrity: Integrity;
-  discrepancy: string | null;
-}
+export type { Integrity, Results } from '../domain/results.js';
 
 export interface PollView {
   pollId: string;
@@ -29,37 +22,23 @@ export interface PollView {
   results: Results | null;
 }
 
+/** §6.4 — when this poll and everything it produced are deleted. */
+export function deletionDateOf(poll: authRepo.Poll): string | null {
+  if (!poll.finalizedAt) return null;
+  return new Date(
+    new Date(poll.finalizedAt).getTime() + RETENTION_DAYS_AFTER_END * 24 * 3600_000,
+  ).toISOString();
+}
+
 function turnoutOf(poll: authRepo.Poll): number {
   // Ballots live exactly as long as their poll does (§6.4), so the live count
   // is always available while the poll is readable at all.
   return authRepo.countConsumed(poll.pollId);
 }
 
-/**
- * FR-4.5 — the audit. Results are released only when the counter total, the
- * number of consumed ballots and the roster size all agree. Any disagreement
- * suppresses the numbers entirely; it is not a warning printed next to them.
- */
+/** FR-4.5 — the audit, delegated to the pure rule in `domain/results`. */
 function computeResults(poll: authRepo.Poll, turnout: number): Results {
-  const counts = tallyRepo.readTallies(poll.pollId);
-  const sum = counts.reduce((a, b) => a + b, 0);
-  const pass = sum === turnout && turnout === poll.voterCount;
-  if (pass) {
-    return {
-      counts,
-      totalBallots: sum,
-      rosterSize: poll.voterCount,
-      integrity: 'PASS',
-      discrepancy: null,
-    };
-  }
-  return {
-    counts: [], // suppressed
-    totalBallots: sum,
-    rosterSize: poll.voterCount,
-    integrity: 'INVALID',
-    discrepancy: `Counted ballots: ${sum}. Ballots consumed: ${turnout}. Roster size: ${poll.voterCount}. These must be equal, so the result is withheld.`,
-  };
+  return summarise(tallyRepo.readTallies(poll.pollId), turnout, poll.voterCount);
 }
 
 /**
@@ -81,11 +60,7 @@ export function getPollView(pollId: string): PollView | null {
     configHash: poll.configHash,
     voterCount: poll.voterCount,
     turnout,
-    deletesAt: poll.finalizedAt
-      ? new Date(
-          new Date(poll.finalizedAt).getTime() + RETENTION_DAYS_AFTER_END * 24 * 3600_000,
-        ).toISOString()
-      : null,
+    deletesAt: deletionDateOf(poll),
     results: null,
   };
 
@@ -93,8 +68,11 @@ export function getPollView(pollId: string): PollView | null {
 
   view.results = computeResults(poll, turnout);
 
-  // FR-4.7 — the poll is over and has been shown. The addresses go.
-  if (!poll.emailsPurged) authRepo.purgeEmails(poll.pollId);
+  // FR-4.7 — the poll is over and has been shown, so the addresses go. The one
+  // thing they are still needed for is the results email, so the purge waits
+  // for that to be claimed; otherwise a fast reader could delete the roster
+  // before anyone had been told the outcome.
+  if (!poll.emailsPurged && poll.resultsNotified) authRepo.purgeEmails(poll.pollId);
 
   return view;
 }

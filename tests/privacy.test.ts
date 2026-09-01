@@ -260,6 +260,196 @@ describe('Appendix A — logs leak nothing', () => {
   });
 });
 
+describe('the result is emailed to every voter when the poll ends', () => {
+  const resultMail = () => sentMail().filter((m) => m.body.subject.startsWith('Result'));
+
+  it('sends the counts and the total ballot count to every address on the roster', async () => {
+    const { pollId, invites } = await makePoll({ rawOptions: ['Yes', 'No'] });
+    clearMail();
+
+    invites.forEach((invite, i) => castVote({ kind: 'token', token: invite.token }, i === 2 ? 1 : 0));
+    await flush();
+
+    const mail = resultMail();
+    expect(mail.map((m) => m.to).sort()).toEqual(invites.map((i) => i.email).sort());
+
+    for (const { body } of mail) {
+      expect(body.subject).toBe('Result: Do we take the bridge round?');
+      expect(body.text).toContain('Yes: 2');
+      expect(body.text).toContain('No: 1');
+      expect(body.text).toContain('Total ballots cast: 3');
+      expect(body.text).toContain('Voters invited: 3');
+      expect(body.text).toContain('Integrity: PASS');
+      expect(body.html).toContain('Total ballots cast');
+      // The link to the page is still there, but the numbers no longer depend on it.
+      expect(body.text).toContain(`/p/${pollId}`);
+    }
+  });
+
+  it('sends nothing until the very last ballot lands', async () => {
+    const { invites } = await makePoll();
+    clearMail();
+
+    for (const invite of invites.slice(0, 2)) castVote({ kind: 'token', token: invite.token }, 0);
+    await flush();
+    expect(resultMail()).toEqual([]);
+
+    castVote({ kind: 'token', token: invites[2]!.token }, 0);
+    await flush();
+    expect(resultMail().length).toBe(3);
+  });
+
+  it('names a tie rather than inventing a winner', async () => {
+    const { invites } = await makePoll({
+      rawOptions: ['Yes', 'No'],
+      voters: ['a@example.com', 'b@example.com', 'c@example.com', 'd@example.com'],
+    });
+    clearMail();
+
+    invites.forEach((invite, i) => castVote({ kind: 'token', token: invite.token }, i % 2));
+    await flush();
+
+    for (const { body } of resultMail()) {
+      expect(body.text).toContain('It is a tie: Yes / No, 2 each.');
+      expect(body.text).toContain('Total ballots cast: 4');
+    }
+  });
+
+  it('says plainly that a unanimous result deanonymises everyone', async () => {
+    const { invites } = await makePoll();
+    clearMail();
+
+    for (const invite of invites) castVote({ kind: 'token', token: invite.token }, 0);
+    await flush();
+
+    for (const { body } of resultMail()) {
+      expect(body.text).toMatch(/unanimous, so it tells you how each of the 3 of you voted/);
+    }
+
+    // A split result carries no such caveat.
+    const split = await makePoll();
+    clearMail();
+    split.invites.forEach((invite, i) => castVote({ kind: 'token', token: invite.token }, i === 0 ? 1 : 0));
+    await flush();
+    for (const { body } of resultMail()) expect(body.text).not.toMatch(/unanimous/);
+  });
+
+  it('recovers an announcement the process died before sending', async () => {
+    const question = 'Crash recovery: do we ship on Friday?';
+    const { pollId, invites } = await makePoll({ question });
+    clearMail();
+
+    castVote({ kind: 'token', token: invites[0]!.token }, 0);
+    castVote({ kind: 'token', token: invites[1]!.token }, 0);
+    // The crash case: the final ballot is consumed and the poll completes
+    // inside that transaction, but the process dies before the mail goes out.
+    authRepo.consumeBallot(hashToken(invites[2]!.token), new Date().toISOString());
+    await flush();
+    expect(sentMail()).toEqual([]);
+    expect(authRepo.getPoll(pollId)?.resultsNotified).toBe(false);
+
+    // The next sweep — or a restart — finishes the job. The count never
+    // reconciled, so what goes out is the withheld notice, not numbers.
+    // (Other tests in this file also leave crash-completed polls behind, so
+    // the sweep may announce more than this one.)
+    expect(sweepExpiredPolls().announced).toBeGreaterThanOrEqual(1);
+    await flush();
+
+    const mail = sentMail().filter((m) => m.body.text.includes(question));
+    expect(mail.map((m) => m.to).sort()).toEqual(invites.map((i) => i.email).sort());
+    for (const { body } of mail) {
+      expect(body.subject).toMatch(/^Result withheld/);
+      expect(body.text).not.toMatch(/Total ballots cast/);
+    }
+    expect(authRepo.getPoll(pollId)?.resultsNotified).toBe(true);
+  });
+
+  it('announces exactly once, however many times it is asked to', async () => {
+    const { pollId, invites } = await makePoll();
+    clearMail();
+
+    for (const invite of invites) castVote({ kind: 'token', token: invite.token }, 0);
+    await flush();
+    expect(resultMail().length).toBe(3);
+
+    // Both the sweeper and a second vote-path call must find it already claimed.
+    expect(sweepExpiredPolls().announced).toBe(0);
+    expect(authRepo.claimResultsNotification(pollId)).toBe(false);
+    await flush();
+    expect(resultMail().length).toBe(3);
+  });
+
+  it('holds the roster until the announcement is claimed, then purges it (FR-4.7)', async () => {
+    const { pollId, invites } = await makePoll();
+
+    castVote({ kind: 'token', token: invites[0]!.token }, 0);
+    castVote({ kind: 'token', token: invites[1]!.token }, 0);
+    // Complete it the crash way, so nothing has been announced yet.
+    authRepo.consumeBallot(hashToken(invites[2]!.token), new Date().toISOString());
+
+    // A reader arriving first must not be able to delete the addresses out
+    // from under the announcement.
+    getPollView(pollId);
+    getPollView(pollId);
+    expect(authRepo.listRosterEmails(pollId).length).toBe(3);
+
+    sweepExpiredPolls();
+    getPollView(pollId);
+    expect(authRepo.listRosterEmails(pollId)).toEqual([]);
+  });
+
+  it('withholds the numbers when the tally and the roster disagree at completion', async () => {
+    const { pollId, invites } = await makePoll();
+    clearMail();
+
+    castVote({ kind: 'token', token: invites[0]!.token }, 0);
+    castVote({ kind: 'token', token: invites[1]!.token }, 0);
+    // Corrupt the counters before the final ballot lands.
+    tallyRepo.incrementTally(pollId, 0);
+    castVote({ kind: 'token', token: invites[2]!.token }, 0);
+    await flush();
+
+    const mail = sentMail().filter((m) => m.body.subject.startsWith('Result withheld'));
+    expect(mail.length).toBe(3);
+    for (const { body } of mail) {
+      expect(body.text).toMatch(/integrity check/i);
+      expect(body.text).not.toMatch(/Total ballots cast/);
+      expect(body.text).toMatch(/Counted ballots: 4/);
+    }
+  });
+
+  it('sends no counts when the poll fails at its deadline', async () => {
+    const { pollId, invites } = await makePoll();
+    castVote({ kind: 'token', token: invites[0]!.token }, 0);
+    clearMail();
+
+    rewindClock(pollId, { closesAtMsAgo: 1000 });
+    getPollView(pollId);
+    await flush();
+
+    const mail = sentMail();
+    expect(mail.length).toBe(3);
+    for (const { body } of mail) {
+      expect(body.subject).toMatch(/^Failed:/);
+      expect(body.text).toContain('Turnout reached 1 of 3');
+      expect(body.text).not.toMatch(/Yes:|No:|Total ballots cast/);
+    }
+  });
+
+  it('reaches every voter even though completion purges the roster on first render', async () => {
+    const { pollId, invites } = await makePoll();
+    clearMail();
+
+    for (const invite of invites) castVote({ kind: 'token', token: invite.token }, 0);
+    // The render that purges the addresses; the mail was already addressed.
+    getPollView(pollId);
+    expect(authRepo.listRosterEmails(pollId)).toEqual([]);
+    await flush();
+
+    expect(resultMail().length).toBe(3);
+  });
+});
+
 describe('retention — a poll is deleted 7 days after it ends (§6.4)', () => {
   it('survives right up to the window, then is deleted entirely by the sweeper', async () => {
     const { pollId, invites } = await makePoll();

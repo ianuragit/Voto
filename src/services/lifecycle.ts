@@ -4,6 +4,7 @@ import * as authRepo from '../repos/authRepo.js';
 import * as tallyRepo from '../repos/tallyRepo.js';
 import { pollFailedEmail } from '../email/templates.js';
 import { sendEmail } from '../email/zeptomail.js';
+import { notifyPendingResults } from './notifications.js';
 
 /**
  * §11 — deadline handling exists twice: a 60-second sweeper AND lazy
@@ -87,15 +88,23 @@ export function loadPoll(pollId: string): authRepo.Poll | null {
  * The 60-second interval half of §11: fails polls whose deadline has passed,
  * then deletes every poll that ended more than the retention window ago.
  */
-export function sweepExpiredPolls(now: Date = new Date()): { failed: number; deleted: number } {
+export function sweepExpiredPolls(now: Date = new Date()): {
+  failed: number;
+  deleted: number;
+  announced: number;
+} {
   const expired = authRepo.listExpiredOpenPolls(now.toISOString());
   for (const poll of expired) failPoll(poll);
+
+  // A poll that completed while the process was dying still owes its voters an
+  // announcement. Delayed by a restart, never lost to one.
+  const announced = notifyPendingResults();
 
   // §6.4 — 7 days after a poll ends, the poll and its results are deleted.
   const doomed = authRepo.listPollsPastRetention(retentionCutoff(now));
   for (const pollId of doomed) deletePollCompletely(pollId);
 
-  return { failed: expired.length, deleted: doomed.length };
+  return { failed: expired.length, deleted: doomed.length, announced };
 }
 
 export function startSweeper(intervalMs = 60_000): NodeJS.Timeout {

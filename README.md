@@ -35,6 +35,8 @@ anything — not the creator, not the person who runs the server.
 - Turnout is a count, never a roster. There is no API, page, or query in this codebase that
   returns who has voted.
 - Fail closed. Partial results are never rendered, and a failed poll's counts are deleted.
+- When the last ballot lands, every voter is emailed the final counts and the total ballot count
+  — or, if the count does not reconcile, told that and given no numbers.
 - Nothing outlives its purpose. Voting runs for a standard 3, 5 or 7 days, and 7 days after a
   poll ends the poll and everything it produced are deleted outright.
 
@@ -321,6 +323,8 @@ an acceptance criterion from the PRD's Appendix A and has a corresponding test:
 | A crash between consume and tally yields `INVALID`, results withheld | `tests/privacy.test.ts` |
 | The results page renders `total_ballots == roster_size` | `tests/privacy.test.ts`, `tests/http.test.ts` |
 | A poll and its results are gone 7 days after it ends, by sweeper and by lazy read | `tests/privacy.test.ts`, `tests/http.test.ts` |
+| Every voter is emailed the counts and total ballot count, exactly once, on completion | `tests/privacy.test.ts` |
+| An INVALID integrity verdict withholds the numbers from the email too | `tests/privacy.test.ts` |
 | Only 3, 5 and 7 day durations are accepted, and `closes_at` is derived from them | `tests/privacy.test.ts` |
 
 To audit a live deployment yourself:
@@ -356,9 +360,14 @@ to a confirmation screen; the vote is cast on the second, explicit tap.
 
 **Results.** Nothing but turnout (`k of N`) is visible while the poll is open — there is no code
 path that reads the tallies before completion, so early results cannot influence late voters.
-The moment the last ballot lands, the counts appear along with the integrity verdict. If the
-deadline passes with anyone missing, the poll fails, the counts are deleted, and nobody ever
-sees them.
+The moment the last ballot lands, every voter is emailed the final counts, the total ballot count
+and the integrity verdict, and the same appears on the poll page. If the count fails its
+integrity check the email withholds the numbers exactly as the page does. If the deadline passes
+with anyone missing, the poll fails, the counts are deleted, and nobody ever sees them.
+
+Note the trade this makes: the result email is permanent and forwardable, and it outlives the
+7-day deletion below. On a small roster a unanimous result is a lasting record of how each named
+person voted — the email says so when that happens.
 
 **Fixing a typo'd address.** Allowed only while nobody has voted. It changes the config
 fingerprint, so every voter is re-invited with the new one. Once a single vote exists, the
@@ -403,6 +412,7 @@ anywhere in this application and no analytics of any kind.
 | Scenario | Behaviour |
 |---|---|
 | Deadline passes below 100% turnout | Status → `failed`, tallies deleted, turnout shown, counts never |
+| Process dies between completing a poll and mailing the result | The next sweep (or boot) sends it; delivery is claimed atomically so it is sent exactly once |
 | Email bounces | `delivery_status = 'bounced'`, creator warned that the poll cannot complete |
 | Voter clicks their link twice | Second render is harmless; a second vote is a `409` |
 | Mail scanner pre-fetches the link | Nothing consumed — `GET` never mutates |
@@ -416,7 +426,7 @@ anywhere in this application and no analytics of any kind.
 
 | Data | Kept until |
 |---|---|
-| Roster addresses | Poll completion, failure or cancellation, then purged |
+| Roster addresses | Poll completion, failure or cancellation — purged once the result email has gone out |
 | **Everything else about a poll** | **7 days after the poll ends — then the poll, its ballots and its counts are deleted outright and the URL 404s** |
 | Tallies of a failed or cancelled poll | Deleted at the moment of failure, not 7 days later |
 | Rate-limit state | In memory, 15-minute TTL, never persisted |
@@ -450,7 +460,7 @@ one-line change if you disagree. Rationale is in [`DECISIONS.md`](DECISIONS.md).
 | 3 | Manual code format | 8-character Crockford base32, shown as `XXXX-XXXX` |
 | 4 | Minimum N | Refuse 2-person polls outright, with a standing small-N banner |
 | 5 | Failed-poll re-run | Manual re-creation only |
-| 6 | Completion notification | Email everyone a link, never the numbers |
+| 6 | Completion notification | Email everyone the final counts and total ballot count |
 | 7 | Abstention | Opt-in "Abstain" option that counts as participation |
 | 8 | Ties | Counts are shown with a plain "it's a tie" note and no tiebreak |
 | 9 | Retention of completed polls | Deleted 7 days after the poll ends |

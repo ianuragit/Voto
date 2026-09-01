@@ -2,9 +2,8 @@ import { log } from '../logging.js';
 import { hashCode, hashToken, isWellFormedCode } from '../domain/crypto.js';
 import * as authRepo from '../repos/authRepo.js';
 import * as tallyRepo from '../repos/tallyRepo.js';
-import { resultsReadyEmail } from '../email/templates.js';
-import { sendEmail } from '../email/zeptomail.js';
 import { evaluateDeadline } from './lifecycle.js';
+import { notifyResults } from './notifications.js';
 
 /**
  * FR-2.3 — the magic link and the typed code are two ways of presenting the
@@ -83,14 +82,7 @@ export function castVote(cred: Credential, optionIndex: number): VoteResult {
     return { kind: 'lost', pollId: poll.pollId };
   }
 
-  if (outcome.completed) {
-    // Read the roster synchronously, before FR-4.7 purges it on first render.
-    const roster = authRepo.listRosterEmails(poll.pollId);
-    const body = resultsReadyEmail({ question: poll.question, pollId: poll.pollId });
-    void Promise.all(roster.map((email) => sendEmail(email, body))).catch(() => {
-      log.warn('results notification failed', { poll_id: poll.pollId });
-    });
-  }
+  if (outcome.completed) notifyResults(poll, outcome.turnout);
 
   return {
     kind: 'ok',

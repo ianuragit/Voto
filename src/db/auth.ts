@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS polls (
   -- and none of it records when any individual acted.
   finalized_at         TEXT,                 -- when the poll left 'open'; starts the 7-day clock
   final_ballot_count   INTEGER,              -- consumed count frozen at finalisation
+  results_notified     INTEGER NOT NULL DEFAULT 0 CHECK (results_notified IN (0,1)),
   emails_purged        INTEGER NOT NULL DEFAULT 0 CHECK (emails_purged IN (0,1))
 );
 

@@ -10,9 +10,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Read from .nvmrc, never a literal. Railway resolves the same file, so
+      # CI cannot go green on a Node version the deploy will not build on —
+      # which is exactly how a broken build once passed CI.
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
 

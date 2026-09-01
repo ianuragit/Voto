@@ -236,7 +236,30 @@ curl https://<your-domain>/healthz
 
 Railway's health check hits the same path and will not promote a deploy that fails it.
 
-### Step 7 — Point the bounce webhook at the service
+### Step 7 — Confirm mail actually sends
+
+Before anyone depends on it, check the credential and the endpoint from a Railway shell:
+
+```bash
+npm run check:email                      # endpoint + credential only, sends nothing
+npm run check:email you@yourdomain.com   # sends one real test email
+```
+
+It prints the provider's own error code and what to do about it. The three that bite:
+
+| HTTP | Meaning | Fix |
+|---|---|---|
+| `404` | `ZEPTOMAIL_API_URL` has no path | Use the full endpoint ending in `/v1.1/email` |
+| `403` | Wrong path, usually a trailing slash | `/v1.1/email` with nothing after it |
+| `401` | Wrong credential | Use a Mail Agent **Send Mail** token, not an OAuth or admin key |
+
+A `400` normally means the from-address is not on a verified domain — back to step 0.
+
+Invites that never arrive are the worst failure this app has, because a poll needs 100% turnout:
+one undelivered invite means the poll cannot complete and fails at its deadline. Voto marks such
+addresses `failed` on the creator's console, but checking here first is cheaper.
+
+### Step 8 — Point the bounce webhook at the service
 
 1. In ZeptoMail: **Mail Agent → Webhooks → Add webhook**.
 2. URL: `https://<your-domain>/webhooks/zeptomail`
@@ -249,13 +272,13 @@ Unsigned callbacks are rejected with a 401. A bounced address raises a creator-v
 saying the poll cannot complete until it is fixed — which is true, since every invited voter
 must vote.
 
-### Step 8 — Run one real poll end to end before you trust it
+### Step 9 — Run one real poll end to end before you trust it
 
 Create a throwaway 3-person poll among addresses you control, vote from all three, and confirm:
 the invites arrive in inboxes, the two-tap flow works on a phone, and the results page shows
 `Integrity: PASS` with ballots counted equal to roster size.
 
-### Step 9 — Back it up
+### Step 10 — Back it up
 
 Railway volume backups: **Service → Volume → Backups**. Schedule a nightly snapshot.
 
@@ -282,7 +305,7 @@ counters, and a restart re-sweeps deadlines at boot.
 | `DATA_DIR` | **yes** | `./data` | Directory holding both SQLite files. `/data` on Railway |
 | `SESSION_SECRET` | **yes** | — | HMAC key for creator sessions, sign-in links, CSRF, and rate-limit keying. Boot fails in production without it |
 | `ALLOWED_CREATORS` | **yes** | — | Comma-separated addresses allowed to create polls. Boot fails in production if empty |
-| `ZEPTOMAIL_API_URL` | no | `https://api.zeptomail.com/v1.1/email` | Use `api.zeptomail.in` for India-region accounts |
+| `ZEPTOMAIL_API_URL` | no | `https://api.zeptomail.com/v1.1/email` | **The full endpoint, ending in `/v1.1/email`.** Only the host changes by data centre — `api.zeptomail.in` for India-region accounts. A bare host answers `404` and invites silently never arrive; Voto appends the path if you omit it, but set it in full |
 | `ZEPTOMAIL_API_KEY` | **yes** | — | Send Mail token. Without it, Voto runs in dry-run and prints subjects instead of sending |
 | `ZEPTOMAIL_FROM_ADDRESS` | **yes** | — | Must be on the verified sending domain |
 | `ZEPTOMAIL_FROM_NAME` | no | `Voto` | Display name |
@@ -421,6 +444,7 @@ anywhere in this application and no analytics of any kind.
 | Deadline passes below 100% turnout | Status → `failed`, tallies deleted, turnout shown, counts never |
 | Process dies between completing a poll and mailing the result | The next sweep (or boot) sends it; delivery is claimed atomically so it is sent exactly once |
 | Email bounces | `delivery_status = 'bounced'`, creator warned that the poll cannot complete |
+| Provider rejects the send (bad URL, key or from-address) | Marked `failed` immediately with the provider's error code logged — no pointless retries, since a 4xx cannot succeed on a second attempt. Diagnose with `npm run check:email` |
 | Voter clicks their link twice | Second render is harmless; a second vote is a `409` |
 | Mail scanner pre-fetches the link | Nothing consumed — `GET` never mutates |
 | Crash between consume and tally | Ballot lost, poll `at_risk`, fails at deadline, results suppressed |

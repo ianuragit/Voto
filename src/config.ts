@@ -59,6 +59,30 @@ export type Config = z.infer<typeof schema> & {
   emailDryRun: boolean;
 };
 
+/** ZeptoMail's transactional send path. Identical on every data centre. */
+export const ZEPTOMAIL_SEND_PATH = '/v1.1/email';
+
+/**
+ * Accepts what people actually paste and turns it into the endpoint that
+ * works. The regions differ only in host — `api.zeptomail.com`,
+ * `api.zeptomail.in` and friends all serve the same path — so a bare host is
+ * an obvious, common thing to configure, and it must not be a silent failure.
+ *
+ *   https://api.zeptomail.in            -> https://api.zeptomail.in/v1.1/email
+ *   https://api.zeptomail.in/           -> https://api.zeptomail.in/v1.1/email
+ *   https://api.zeptomail.in/v1.1/email/ -> https://api.zeptomail.in/v1.1/email
+ *
+ * Getting this wrong is not a visible error at deploy time — it surfaces
+ * later, as invites that never arrive, on a poll that then cannot complete.
+ * The provider answers a path-less URL with 404 and a trailing slash with 403,
+ * neither of which says "your URL is wrong".
+ */
+export function normalizeZeptoMailUrl(raw: string): string {
+  const url = new URL(raw);
+  const path = url.pathname.replace(/\/+$/, '');
+  return `${url.origin}${path === '' ? ZEPTOMAIL_SEND_PATH : path}`;
+}
+
 function build(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = schema.parse(env);
   const isProduction = parsed.NODE_ENV === 'production';
@@ -76,6 +100,7 @@ function build(env: NodeJS.ProcessEnv = process.env): Config {
 
   return {
     ...parsed,
+    ZEPTOMAIL_API_URL: normalizeZeptoMailUrl(parsed.ZEPTOMAIL_API_URL),
     isProduction,
     // §6.3 — production logs at warn.
     logLevel: parsed.LOG_LEVEL ?? (isProduction ? 'warn' : 'info'),

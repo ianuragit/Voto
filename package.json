@@ -15,7 +15,8 @@
     "check:airgap": "node scripts/check-air-gap.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify": "npm run check:airgap && npm run typecheck && npm run test"
+    "verify": "npm run check:airgap && npm run typecheck && npm run test",
+    "check:email": "node scripts/check-email.mjs"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

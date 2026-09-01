@@ -220,6 +220,13 @@ would not be deleted) until someone next loads the page.
 
 ### Step 6 — Deploy and check health
 
+The Node version comes from `.nvmrc` and `package.json` `engines.node`, both pinned to 20. Leave
+them alone unless you have read the Node-version note under
+[Operational notes](#operational-notes) — a newer Node breaks the build at `npm ci`, because
+`better-sqlite3` has no prebuilt binary for it and the build image has no Python. If you ever
+need to override the version from Railway rather than the repo, set `NIXPACKS_NODE_VERSION=20`
+as a service variable; Nixpacks gives it precedence over both files.
+
 Trigger a deploy (push to the branch, or `railway up`). When it is live:
 
 ```bash
@@ -440,8 +447,36 @@ invite and the results email.
 Deletion is enforced twice, like the deadline: by the 60-second sweeper, and lazily on every
 read, so a poll can never be served past its window even if the sweeper never runs.
 
-**Stack.** Node 20+, TypeScript, Fastify, `better-sqlite3`, Zod, server-rendered HTML. No client
-framework, no build step for the frontend, no JavaScript shipped to the browser.
+**Stack.** Node 20 (pinned), TypeScript, Fastify, `better-sqlite3`, Zod, server-rendered HTML. No
+client framework, no build step for the frontend, no JavaScript shipped to the browser.
+
+**The Node version is pinned on purpose — don't bump it casually.** `better-sqlite3` is a native
+module, and it only installs cleanly on a Node release it publishes a prebuilt binary for. On
+anything newer, npm falls back to compiling from source with `node-gyp`, which needs Python and a
+C toolchain that the Railway build image does not have — so the deploy fails at `npm ci` with
+`Could not find any Python installation to use`.
+
+The version lives in **`.nvmrc`**, and everything reads from there:
+
+- `package.json` `engines.node` (`20.x`) is what Nixpacks resolves for the Railway build.
+- CI uses `node-version-file: .nvmrc`, so CI and Railway can never disagree about the runtime.
+  They did once, and the result was a green CI badge on a deploy that could not build.
+
+To move to a newer Node, first check that a prebuilt binary exists for that ABI, upgrading
+`better-sqlite3` if needed:
+
+```bash
+# Node 20 = ABI 115, Node 22 = 127, Node 24 = 137
+curl -sLo /dev/null -w '%{http_code}\n' \
+  https://github.com/WiseLibs/better-sqlite3/releases/download/v11.10.0/better_sqlite3-v11.10.0-node-v137-linux-x64.tar.gz
+```
+
+`200` means it is safe to bump; `404` means the deploy will fail. Then update `.nvmrc` and
+`engines.node` together, and confirm a clean install needs no compiler:
+
+```bash
+rm -rf node_modules && npm_config_python=/nonexistent npm ci   # must succeed
+```
 
 **Scaling.** It doesn't, and shouldn't. One replica, 3–25 voters per poll. If you need more than
 that, you need a different threat model, not a bigger server.

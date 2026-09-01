@@ -2,7 +2,12 @@ import { esc, formatUtc } from '../../domain/escape.js';
 import { formatHash } from '../../domain/crypto.js';
 import type { PollView } from '../../services/resultsService.js';
 import type { DeliveryStatus, Poll } from '../../repos/authRepo.js';
-import { MAX_VOTERS, MIN_VOTERS } from '../../domain/validation.js';
+import {
+  ALLOWED_DURATION_DAYS,
+  MAX_VOTERS,
+  MIN_VOTERS,
+  RETENTION_DAYS_AFTER_END,
+} from '../../domain/validation.js';
 import { layout } from './layout.js';
 
 /** §2.2 — the banner we show rather than promise anonymity the maths can't back. */
@@ -31,6 +36,19 @@ ${
 }
 <p class="muted" style="margin-top:12px">Config fingerprint — compare it against your invite email and against anyone else's:</p>
 <p class="hash">${esc(formatHash(view.configHash))}</p>`;
+}
+
+/**
+ * §6.4 — every page that shows a poll says when it stops existing. A retention
+ * rule nobody is told about is a data-loss bug the first time it fires.
+ */
+function retentionNote(view: PollView): string {
+  if (view.deletesAt) {
+    return `<p class="note warn">This poll and its result are deleted on <strong>${esc(
+      formatUtc(view.deletesAt),
+    )}</strong> — ${RETENTION_DAYS_AFTER_END} days after it ended. Save anything you need before then.</p>`;
+  }
+  return `<p class="muted">This poll, and whatever it decides, are deleted ${RETENTION_DAYS_AFTER_END} days after voting ends.</p>`;
 }
 
 function statusPill(status: string): string {
@@ -80,6 +98,7 @@ ${view.options
   <p class="muted"><strong>Closes ${esc(formatUtc(view.closesAt))}.</strong> Results appear only when all ${
     view.voterCount
   } of you have voted. If anyone misses the deadline the poll fails and nobody sees anything.</p>
+  ${retentionNote(view)}
   ${turnoutBlock(view)}
   ${verifyBlock(view, input.roster)}
 </div>`,
@@ -162,6 +181,7 @@ export function pollPage(view: PollView): string {
   <h2>Options</h2>
   <ul class="roster">${view.options.map((o) => `<li>${esc(o)}</li>`).join('')}</ul>
   ${body[view.status] ?? ''}
+  ${retentionNote(view)}
   ${turnoutBlock(view)}
   ${verifyBlock(view)}
 </div>`,
@@ -179,6 +199,7 @@ function resultsPage(view: PollView): string {
   <h1>${esc(view.question)}</h1>
   <p class="note bad"><strong>Integrity check: INVALID.</strong> ${esc(r.discrepancy ?? '')}</p>
   <p class="muted">Voto shows counts only when they are provably complete. They are withheld here rather than shown with a caveat.</p>
+  ${retentionNote(view)}
   ${verifyBlock(view)}
 </div>`,
     );
@@ -219,6 +240,7 @@ ${view.options
     <tr><th>Roster size</th><td>${r.rosterSize}</td></tr>
     <tr><th>Integrity</th><td><strong>PASS</strong> — every invited voter cast exactly one ballot, and no extra ballot exists.</td></tr>
   </table>
+  ${retentionNote(view)}
   ${verifyBlock(view)}
 </div>`,
   );
@@ -317,9 +339,17 @@ export function createFormPage(input: {
       <p class="hint">${MIN_VOTERS}–${MAX_VOTERS} addresses, separated by commas, semicolons or newlines. Every one of them must vote or the poll fails.</p>
     </div>
     <div class="field">
-      <label for="closes_at">Closes at (your local time)</label>
-      <input id="closes_at" name="closes_at" type="datetime-local" required>
-      <p class="hint">Between 15 minutes and 14 days from now.</p>
+      <label>How long voting stays open</label>
+      <ul class="choices">
+${ALLOWED_DURATION_DAYS.map(
+  (days, i) => `        <li><label class="choice">
+          <input type="radio" name="duration_days" value="${days}"${i === 0 ? ' checked' : ''}>
+          <span>${days} days</span>
+        </label></li>`,
+).join('\n')}
+      </ul>
+      <p class="hint">Three standard durations, and nothing else. A custom deadline is a lever — "closes in 40 minutes" shapes who manages to vote at all.</p>
+      <p class="hint"><strong>The poll and its result are deleted ${RETENTION_DAYS_AFTER_END} days after voting ends.</strong> Voto is not the record of what you decided — write that down somewhere else.</p>
     </div>
     <div class="field">
       <label><input type="checkbox" name="creator_votes" value="1"> I am voting too</label>
@@ -379,6 +409,7 @@ export function consolePollPage(input: {
   <p class="muted">Voter link: <a href="/p/${esc(view.pollId)}">/p/${esc(view.pollId)}</a></p>
   ${turnoutBlock(view)}
   <p class="note warn">You cannot see who has voted, and neither can anyone else. If someone is holding out, this tool will not tell you who — by design (US-5).</p>
+  ${retentionNote(view)}
 </div>
 
 <div class="card">

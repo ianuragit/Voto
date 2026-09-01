@@ -35,6 +35,8 @@ anything — not the creator, not the person who runs the server.
 - Turnout is a count, never a roster. There is no API, page, or query in this codebase that
   returns who has voted.
 - Fail closed. Partial results are never rendered, and a failed poll's counts are deleted.
+- Nothing outlives its purpose. Voting runs for a standard 3, 5 or 7 days, and 7 days after a
+  poll ends the poll and everything it produced are deleted outright.
 
 **Not guaranteed — read this before a contentious vote**
 
@@ -318,6 +320,8 @@ an acceptance criterion from the PRD's Appendix A and has a corresponding test:
 | A poll expiring at 4/5 leaves zero tally rows | `tests/privacy.test.ts` |
 | A crash between consume and tally yields `INVALID`, results withheld | `tests/privacy.test.ts` |
 | The results page renders `total_ballots == roster_size` | `tests/privacy.test.ts`, `tests/http.test.ts` |
+| A poll and its results are gone 7 days after it ends, by sweeper and by lazy read | `tests/privacy.test.ts`, `tests/http.test.ts` |
+| Only 3, 5 and 7 day durations are accepted, and `closes_at` is derived from them | `tests/privacy.test.ts` |
 
 To audit a live deployment yourself:
 
@@ -337,7 +341,9 @@ sqlite3 /data/auth.sqlite  '.schema ballot_tokens'
 
 **Creating a poll.** Sign in at `/` with an address on `ALLOWED_CREATORS` — you get a magic link,
 there is no password. Enter the question, 2–6 fixed options, the voter addresses, and a closing
-time between 15 minutes and 14 days out. You are not a voter unless you tick "I am voting too."
+voting window of **3, 5 or 7 days** — those are the only durations, because a custom deadline is
+a lever ("closes in 40 minutes" shapes who manages to vote at all). You are not a voter unless
+you tick "I am voting too."
 Invites go out immediately.
 
 You will not be able to see who has voted. That is the point: it means nobody can lean on a
@@ -411,10 +417,18 @@ anywhere in this application and no analytics of any kind.
 | Data | Kept until |
 |---|---|
 | Roster addresses | Poll completion, failure or cancellation, then purged |
-| Token hashes + consumed flag | 30 days after finalisation (the integrity count is frozen onto the poll row first) |
-| Tallies of a completed poll | Indefinitely — this is the decision record |
-| Tallies of a failed or cancelled poll | Deleted at the moment of failure |
+| **Everything else about a poll** | **7 days after the poll ends — then the poll, its ballots and its counts are deleted outright and the URL 404s** |
+| Tallies of a failed or cancelled poll | Deleted at the moment of failure, not 7 days later |
 | Rate-limit state | In memory, 15-minute TTL, never persisted |
+
+**Voto is not your system of record.** Seven days after a poll ends — completed, failed or
+cancelled alike — the question, the options, the roster, the token hashes, the turnout and the
+counts are all deleted, and `/p/:poll_id` returns 404. Write the decision down somewhere else.
+Every voter is told the exact deletion date on the ballot, on the results page, and in both the
+invite and the results email.
+
+Deletion is enforced twice, like the deadline: by the 60-second sweeper, and lazily on every
+read, so a poll can never be served past its window even if the sweeper never runs.
 
 **Stack.** Node 20+, TypeScript, Fastify, `better-sqlite3`, Zod, server-rendered HTML. No client
 framework, no build step for the frontend, no JavaScript shipped to the browser.
@@ -439,7 +453,7 @@ one-line change if you disagree. Rationale is in [`DECISIONS.md`](DECISIONS.md).
 | 6 | Completion notification | Email everyone a link, never the numbers |
 | 7 | Abstention | Opt-in "Abstain" option that counts as participation |
 | 8 | Ties | Counts are shown with a plain "it's a tie" note and no tiebreak |
-| 9 | Retention of completed polls | Indefinite |
+| 9 | Retention of completed polls | Deleted 7 days after the poll ends |
 | 10 | Results access | Anyone with the `poll_id` URL (a 122-bit UUID) |
 
 ---

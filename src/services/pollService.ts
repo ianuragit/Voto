@@ -7,9 +7,9 @@ import {
   MAX_VOTERS,
   MIN_VOTERS,
   isEmail,
-  normalizeDeadline,
   parseEmailList,
   parseOptions,
+  resolveDeadline,
 } from '../domain/validation.js';
 import * as authRepo from '../repos/authRepo.js';
 import * as tallyRepo from '../repos/tallyRepo.js';
@@ -20,7 +20,8 @@ export interface CreatePollRequest {
   question: string;
   rawOptions: string[];
   rawVoters: string;
-  rawClosesAt: string;
+  /** One of the standard durations: 3, 5 or 7 days. */
+  rawDurationDays: unknown;
   creatorEmail: string;
   creatorVotes: boolean;
   allowAbstain: boolean;
@@ -80,8 +81,11 @@ export function createPoll(req: CreatePollRequest): CreatePollResult {
     return { ok: false, error: `A poll can have at most ${MAX_VOTERS} voters.` };
   }
 
-  const { closesAtIso, error: deadlineError } = normalizeDeadline(req.rawClosesAt);
-  if (deadlineError || !closesAtIso) return { ok: false, error: deadlineError ?? 'Invalid deadline.' };
+  // One instant for both timestamps, so closes_at is exactly N days after
+  // created_at rather than a few milliseconds short of it.
+  const now = new Date();
+  const { closesAtIso, error: deadlineError } = resolveDeadline(req.rawDurationDays, now);
+  if (deadlineError || !closesAtIso) return { ok: false, error: deadlineError ?? 'Invalid duration.' };
 
   // §12 Q7 — abstention is participation, and it is visible as an option to everyone.
   const finalOptions = req.allowAbstain ? [...options, ABSTAIN_LABEL] : options;
@@ -105,7 +109,7 @@ export function createPoll(req: CreatePollRequest): CreatePollResult {
     voterCount: roster.length,
     creatorEmail,
     configHash,
-    createdAt: new Date().toISOString(),
+    createdAt: now.toISOString(),
     closesAt: closesAtIso,
     tokens: issued.map((i) => ({
       tokenHash: i.tokenHash,

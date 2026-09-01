@@ -4,7 +4,14 @@ import { buildServer } from '../src/server.js';
 import * as authRepo from '../src/repos/authRepo.js';
 import { hashToken } from '../src/domain/crypto.js';
 import { resetRateLimits } from '../src/web/rateLimit.js';
-import { clearMail, flush, installCapturingTransport, makePoll } from './helpers.js';
+import {
+  DAY_MS,
+  clearMail,
+  flush,
+  installCapturingTransport,
+  makePoll,
+  rewindClock,
+} from './helpers.js';
 
 let app: FastifyInstance;
 
@@ -128,21 +135,12 @@ describe('the ballot flow', () => {
   });
 
   it('returns 410 once the deadline has passed (FR-3.6)', async () => {
-    const { pollId, invites } = await makePoll({ minutes: 20 });
+    const { pollId, invites } = await makePoll();
     const ballot = await app.inject({ method: 'GET', url: `/v/${invites[0]!.token}` });
     const cookies = jar(ballot.headers as Record<string, unknown>);
     const csrf = hiddenField(ballot.body, 'csrf');
 
-    // There is no API that moves a poll's deadline, so the test moves the clock
-    // in the store directly.
-    const { default: Database } = await import('better-sqlite3');
-    const { config } = await import('../src/config.js');
-    const path = await import('node:path');
-    const handle = new Database(path.join(config.DATA_DIR, 'auth.sqlite'));
-    handle
-      .prepare('UPDATE polls SET closes_at = ? WHERE poll_id = ?')
-      .run(new Date(Date.now() - 60_000).toISOString(), pollId);
-    handle.close();
+    rewindClock(pollId, { closesAtMsAgo: 60_000 });
 
     const cast = await app.inject({
       method: 'POST',
@@ -261,23 +259,42 @@ describe('results are withheld until they are complete', () => {
   });
 
   it('shows failure with turnout but no numbers after the deadline (US-14)', async () => {
-    const { pollId, invites } = await makePoll({ minutes: 20 });
+    const { pollId, invites } = await makePoll();
     await voteThroughTheUi(pollId, invites[0]!.token, 0);
 
-    const { default: Database } = await import('better-sqlite3');
-    const { config } = await import('../src/config.js');
-    const path = await import('node:path');
-    const handle = new Database(path.join(config.DATA_DIR, 'auth.sqlite'));
-    handle
-      .prepare('UPDATE polls SET closes_at = ? WHERE poll_id = ?')
-      .run(new Date(Date.now() - 60_000).toISOString(), pollId);
-    handle.close();
+    rewindClock(pollId, { closesAtMsAgo: 60_000 });
 
     const page = await app.inject({ method: 'GET', url: `/p/${pollId}` });
     expect(page.body).toContain('Failed — no consensus');
     expect(page.body).toContain('1 <span'); // turnout reached, still shown
     const results = await app.inject({ method: 'GET', url: `/api/polls/${pollId}/results` });
     expect(results.statusCode).toBe(403);
+  });
+});
+
+describe('retention (§6.4)', () => {
+  it('404s a poll once it is past its retention window', async () => {
+    const { pollId, invites } = await makePoll();
+    for (const invite of invites) await voteThroughTheUi(pollId, invite.token, 0);
+
+    const live = await app.inject({ method: 'GET', url: `/p/${pollId}` });
+    expect(live.statusCode).toBe(200);
+
+    rewindClock(pollId, { finalizedMsAgo: 8 * DAY_MS });
+
+    const gone = await app.inject({ method: 'GET', url: `/p/${pollId}` });
+    expect(gone.statusCode).toBe(404);
+    const results = await app.inject({ method: 'GET', url: `/api/polls/${pollId}/results` });
+    expect(results.statusCode).toBe(404);
+    const turnout = await app.inject({ method: 'GET', url: `/api/polls/${pollId}/turnout` });
+    expect(turnout.statusCode).toBe(404);
+  });
+
+  it('shows the deletion date on the results page', async () => {
+    const { pollId, invites } = await makePoll();
+    for (const invite of invites) await voteThroughTheUi(pollId, invite.token, 0);
+    const page = await app.inject({ method: 'GET', url: `/p/${pollId}` });
+    expect(page.body).toMatch(/This poll and its result are deleted on/);
   });
 });
 

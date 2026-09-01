@@ -1,3 +1,6 @@
+import path from 'node:path';
+import Database from 'better-sqlite3';
+import { config } from '../src/config.js';
 import { setTransport } from '../src/email/zeptomail.js';
 import { createPoll } from '../src/services/pollService.js';
 import type { EmailBody } from '../src/email/templates.js';
@@ -41,9 +44,32 @@ export function invitesFromMail(): CapturedInvite[] {
   return out;
 }
 
-export function inFuture(minutes: number): string {
-  return new Date(Date.now() + minutes * 60_000).toISOString();
+/**
+ * Moves a poll's clock in the store directly. There is no API that changes a
+ * deadline or a finalisation time, which is the point — so tests reach for the
+ * database rather than a back door in the application.
+ */
+export function rewindClock(
+  pollId: string,
+  change: { closesAtMsAgo?: number; finalizedMsAgo?: number },
+): void {
+  const db = new Database(path.join(config.DATA_DIR, 'auth.sqlite'));
+  if (change.closesAtMsAgo !== undefined) {
+    db.prepare('UPDATE polls SET closes_at = ? WHERE poll_id = ?').run(
+      new Date(Date.now() - change.closesAtMsAgo).toISOString(),
+      pollId,
+    );
+  }
+  if (change.finalizedMsAgo !== undefined) {
+    db.prepare('UPDATE polls SET finalized_at = ? WHERE poll_id = ?').run(
+      new Date(Date.now() - change.finalizedMsAgo).toISOString(),
+      pollId,
+    );
+  }
+  db.close();
 }
+
+export const DAY_MS = 24 * 3600_000;
 
 export interface Made {
   pollId: string;
@@ -57,7 +83,7 @@ export async function makePoll(
     question: string;
     rawOptions: string[];
     voters: string[];
-    minutes: number;
+    durationDays: number;
     allowAbstain: boolean;
   }> = {},
 ): Promise<Made> {
@@ -67,7 +93,7 @@ export async function makePoll(
     question: overrides.question ?? 'Do we take the bridge round?',
     rawOptions: overrides.rawOptions ?? ['Yes', 'No'],
     rawVoters: voters.join(', '),
-    rawClosesAt: inFuture(overrides.minutes ?? 60),
+    rawDurationDays: overrides.durationDays ?? 3,
     creatorEmail: 'ravi@example.com',
     creatorVotes: false,
     allowAbstain: overrides.allowAbstain ?? false,

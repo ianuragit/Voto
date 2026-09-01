@@ -6,9 +6,19 @@ export const MIN_VOTERS = 3; // §2.2 / US-2 — below this, anonymity is a lie.
 export const MAX_VOTERS = 25;
 export const MIN_OPTIONS = 2;
 export const MAX_OPTIONS = 6;
-export const MIN_LEAD_MINUTES = 15;
-export const MAX_LEAD_DAYS = 14;
 export const ABSTAIN_LABEL = 'Abstain';
+
+/**
+ * Voting runs for one of three standard durations. An arbitrary closing time
+ * is not offered: a deadline is a lever — "closes in 40 minutes" is a way to
+ * shape who manages to vote — and standard durations take that lever away.
+ * They also make every poll's clock legible to voters without arithmetic.
+ */
+export const ALLOWED_DURATION_DAYS = [3, 5, 7] as const;
+export type DurationDays = (typeof ALLOWED_DURATION_DAYS)[number];
+
+/** A poll and everything it produced are deleted this long after it ends. */
+export const RETENTION_DAYS_AFTER_END = 7;
 
 /**
  * Pragmatic RFC-5322 subset: the addresses that actually deliver. Rejects
@@ -66,7 +76,7 @@ export const createPollSchema = z.object({
   question: z.string().trim().min(1, 'A question is required.').max(280),
   options: z.array(z.string()).min(1).max(MAX_OPTIONS),
   voters: z.string().min(1, 'List the voters.'),
-  closes_at: z.string().min(1, 'A closing time is required.'),
+  duration_days: z.union([z.string(), z.number()]),
   /** FR-1.4 — the creator is a voter only if they say so. */
   creator_votes: z.union([z.string(), z.boolean()]).optional(),
   /** §12 Q7 — opt-in explicit abstention. */
@@ -81,25 +91,30 @@ export function checkboxOn(value: unknown): boolean {
 
 export interface DeadlineResult {
   closesAtIso: string | null;
+  durationDays: DurationDays | null;
   error: string | null;
 }
 
-/** FR-1.5 — 15 minutes to 14 days ahead, stored UTC. */
-export function normalizeDeadline(raw: string, now: Date = new Date()): DeadlineResult {
-  // Accept both an ISO instant and the `datetime-local` value a browser posts.
-  const candidate = /Z$|[+-]\d{2}:\d{2}$/.test(raw) ? raw : `${raw}Z`;
-  const parsed = new Date(candidate);
-  if (Number.isNaN(parsed.getTime())) {
-    return { closesAtIso: null, error: 'That closing time is not a valid date.' };
+export function isAllowedDuration(value: number): value is DurationDays {
+  return (ALLOWED_DURATION_DAYS as readonly number[]).includes(value);
+}
+
+/**
+ * FR-1.5 — the deadline is derived from one of the standard durations, never
+ * supplied directly, and stored UTC. There is no code path that accepts an
+ * arbitrary closing time.
+ */
+export function resolveDeadline(rawDays: unknown, now: Date = new Date()): DeadlineResult {
+  const days = Number(typeof rawDays === 'string' ? rawDays.trim() : rawDays);
+  if (!Number.isFinite(days) || !isAllowedDuration(days)) {
+    return {
+      closesAtIso: null,
+      durationDays: null,
+      error: `Voting runs for ${ALLOWED_DURATION_DAYS.join(', ')} days. Pick one of those.`,
+    };
   }
-  const deltaMs = parsed.getTime() - now.getTime();
-  if (deltaMs < MIN_LEAD_MINUTES * 60_000) {
-    return { closesAtIso: null, error: `The closing time must be at least ${MIN_LEAD_MINUTES} minutes away.` };
-  }
-  if (deltaMs > MAX_LEAD_DAYS * 24 * 3600_000) {
-    return { closesAtIso: null, error: `The closing time must be within ${MAX_LEAD_DAYS} days.` };
-  }
-  return { closesAtIso: parsed.toISOString(), error: null };
+  const closesAt = new Date(now.getTime() + days * 24 * 3600_000);
+  return { closesAtIso: closesAt.toISOString(), durationDays: days, error: null };
 }
 
 export const voteSchema = z.object({

@@ -1,4 +1,5 @@
 import { log } from '../logging.js';
+import { RETENTION_DAYS_AFTER_END } from '../domain/validation.js';
 import * as authRepo from '../repos/authRepo.js';
 import * as tallyRepo from '../repos/tallyRepo.js';
 import { pollFailedEmail } from '../email/templates.js';
@@ -32,16 +33,48 @@ export function failPoll(poll: authRepo.Poll): void {
   });
 }
 
+/** The instant a poll that ended at `finalizedAt` stops existing. */
+export function retentionCutoff(now: Date = new Date()): string {
+  return new Date(now.getTime() - RETENTION_DAYS_AFTER_END * 24 * 3600_000).toISOString();
+}
+
 /**
- * Returns the poll as it should be seen right now. If its deadline has passed
- * while it was still open, it fails here — before any caller can act on a
- * stale status.
+ * §6.4 — a poll is deleted outright 7 days after it ends, whether it
+ * completed, failed or was cancelled. Question, options, roster, token
+ * hashes, turnout and the counts all go; the URL 404s afterwards.
+ *
+ * Tallies first, then the auth row. A crash in between leaves a poll row that
+ * the next sweep picks up again, rather than counters that nothing can reach.
  */
-export function evaluateDeadline(poll: authRepo.Poll, now: Date = new Date()): authRepo.Poll {
+export function deletePollCompletely(pollId: string): void {
+  tallyRepo.deleteTallies(pollId);
+  authRepo.deletePoll(pollId);
+  log.info('poll deleted at end of retention window', { poll_id: pollId });
+}
+
+/**
+ * Returns the poll as it should be seen right now, or null if it should no
+ * longer exist. Deadlines and the retention window are both enforced here, so
+ * neither depends on the sweeper having run — a poll can never be read in a
+ * state its own clock says it cannot be in.
+ */
+export function evaluateDeadline(poll: authRepo.Poll, now: Date = new Date()): authRepo.Poll | null {
+  if (poll.finalizedAt && poll.finalizedAt < retentionCutoff(now)) {
+    deletePollCompletely(poll.pollId);
+    return null;
+  }
   if (poll.status !== 'open' && poll.status !== 'at_risk') return poll;
   if (now.toISOString() < poll.closesAt) return poll;
   failPoll(poll);
-  return authRepo.getPoll(poll.pollId) ?? { ...poll, status: 'failed' };
+
+  const failed = authRepo.getPoll(poll.pollId) ?? { ...poll, status: 'failed' as const };
+  // A poll whose deadline passed more than the retention window ago (the
+  // service was down for a long time) fails and is deleted in one pass.
+  if (failed.finalizedAt && failed.finalizedAt < retentionCutoff(now)) {
+    deletePollCompletely(poll.pollId);
+    return null;
+  }
+  return failed;
 }
 
 export function loadPoll(pollId: string): authRepo.Poll | null {
@@ -50,17 +83,19 @@ export function loadPoll(pollId: string): authRepo.Poll | null {
   return evaluateDeadline(poll);
 }
 
-/** The 60-second interval half of §11. Also purges tokens past their retention. */
-export function sweepExpiredPolls(now: Date = new Date()): number {
+/**
+ * The 60-second interval half of §11: fails polls whose deadline has passed,
+ * then deletes every poll that ended more than the retention window ago.
+ */
+export function sweepExpiredPolls(now: Date = new Date()): { failed: number; deleted: number } {
   const expired = authRepo.listExpiredOpenPolls(now.toISOString());
   for (const poll of expired) failPoll(poll);
 
-  // §6.4 — token hashes live 30 days past finalisation, then go.
-  const cutoff = new Date(now.getTime() - 30 * 24 * 3600_000).toISOString();
-  const purged = authRepo.purgeExpiredTokens(cutoff);
-  if (purged > 0) log.info('purged expired token records', { polls: purged });
+  // §6.4 — 7 days after a poll ends, the poll and its results are deleted.
+  const doomed = authRepo.listPollsPastRetention(retentionCutoff(now));
+  for (const pollId of doomed) deletePollCompletely(pollId);
 
-  return expired.length;
+  return { failed: expired.length, deleted: doomed.length };
 }
 
 export function startSweeper(intervalMs = 60_000): NodeJS.Timeout {

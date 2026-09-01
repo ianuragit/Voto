@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 import { esc, formatUtc } from '../domain/escape.js';
 import { formatCode, formatHash } from '../domain/crypto.js';
+import { RETENTION_DAYS_AFTER_END } from '../domain/validation.js';
 
 export interface EmailBody {
   subject: string;
@@ -36,6 +37,7 @@ export function inviteEmail(input: InviteInput): EmailBody {
   const codeUrl = `${config.PUBLIC_BASE_URL}/c/${input.pollId}`;
   const pretty = formatCode(input.code);
   const explainer = `Results stay hidden until all ${input.voterCount} of you have voted. If anyone misses the deadline, the poll fails and nobody sees anything.`;
+  const retention = `This poll and its result are deleted ${RETENTION_DAYS_AFTER_END} days after voting ends.`;
   const prefix = input.reissued ? 'Updated ballot: ' : '';
 
   const text = [
@@ -50,6 +52,7 @@ export function inviteEmail(input: InviteInput): EmailBody {
     `Closes: ${formatUtc(input.closesAt)}`,
     '',
     explainer,
+    retention,
     '',
     `Who is voting (${input.roster.length}):`,
     ...input.roster.map((e) => `  - ${e}`),
@@ -76,7 +79,8 @@ ${input.options.map((o) => `  <li style="margin:4px 0">${esc(o)}</li>`).join('\n
   <strong style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:16px;letter-spacing:.06em">${esc(pretty)}</strong>
 </p>
 <p style="margin:0 0 6px;font-size:14px"><strong>Closes:</strong> ${esc(formatUtc(input.closesAt))}</p>
-<p style="margin:0 0 22px;font-size:14px;color:#444">${esc(explainer)}</p>
+<p style="margin:0 0 6px;font-size:14px;color:#444">${esc(explainer)}</p>
+<p style="margin:0 0 22px;font-size:14px;color:#444">${esc(retention)}</p>
 <div style="background:#faf9f6;border:1px solid #eceae2;border-radius:8px;padding:14px 16px;font-size:13px">
   <p style="margin:0 0 6px;font-weight:600">Who is voting (${input.roster.length})</p>
   <p style="margin:0 0 12px;color:#444">${input.roster.map((e) => esc(e)).join('<br>')}</p>
@@ -102,12 +106,14 @@ export function resultsReadyEmail(input: { question: string; pollId: string }): 
     url,
     '',
     'The numbers are deliberately not in this email.',
+    `The poll and its result are deleted ${RETENTION_DAYS_AFTER_END} days from now — save what you need.`,
   ].join('\n');
   const html = shell(`
 <h1 style="margin:0 0 14px;font-size:20px">Everyone voted. The result is in.</h1>
 <p style="margin:0 0 18px;color:#444">${esc(input.question)}</p>
 <p style="margin:0 0 18px"><a href="${esc(url)}" style="display:inline-block;background:#1a1a1a;color:#fff;text-decoration:none;padding:12px 22px;border-radius:8px;font-weight:600">See the result</a></p>
-<p style="margin:0;font-size:13px;color:#777">The numbers are deliberately not in this email.</p>`);
+<p style="margin:0 0 6px;font-size:13px;color:#777">The numbers are deliberately not in this email.</p>
+<p style="margin:0;font-size:13px;color:#777">The poll and its result are deleted ${RETENTION_DAYS_AFTER_END} days from now — save what you need.</p>`);
   return { subject: `Result: ${truncate(input.question, 110)}`, html, text };
 }
 

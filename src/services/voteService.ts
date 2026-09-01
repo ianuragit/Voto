@@ -53,7 +53,9 @@ export function castVote(cred: Credential, optionIndex: number): VoteResult {
   if (!poll) return { kind: 'unknown' };
 
   // §11 — lazy deadline evaluation on every read. Never trust the timer alone.
+  // Null means the poll passed its retention window and no longer exists.
   const evaluated = evaluateDeadline(poll);
+  if (!evaluated) return { kind: 'unknown' };
   if (evaluated.status !== 'open' && evaluated.status !== 'at_risk') {
     return { kind: 'closed', status: evaluated.status, pollId: poll.pollId };
   }

@@ -21,7 +21,6 @@ export interface Poll {
   finalizedAt: string | null;
   finalBallotCount: number | null;
   emailsPurged: boolean;
-  tokensPurged: boolean;
 }
 
 export interface NewToken {
@@ -52,7 +51,6 @@ interface PollRow {
   finalized_at: string | null;
   final_ballot_count: number | null;
   emails_purged: number;
-  tokens_purged: number;
 }
 
 interface TokenRow {
@@ -78,7 +76,6 @@ function toPoll(row: PollRow): Poll {
     finalizedAt: row.finalized_at,
     finalBallotCount: row.final_ballot_count,
     emailsPurged: row.emails_purged === 1,
-    tokensPurged: row.tokens_purged === 1,
   };
 }
 
@@ -362,25 +359,29 @@ export function purgeEmails(pollId: string): void {
   })();
 }
 
-/** §6.4 — token hashes go 30 days after the poll finalises; the count is already frozen. */
-export function purgeExpiredTokens(cutoffIso: string): number {
+/**
+ * §6.4 — polls that ended before `cutoffIso`. Everything about them, results
+ * included, is deleted once they pass the retention window.
+ */
+export function listPollsPastRetention(cutoffIso: string): string[] {
+  const rows = authDb()
+    .prepare('SELECT poll_id FROM polls WHERE finalized_at IS NOT NULL AND finalized_at < ?')
+    .all(cutoffIso) as { poll_id: string }[];
+  return rows.map((r) => r.poll_id);
+}
+
+/**
+ * Deletes the poll and its ballots outright — question, options, roster,
+ * token hashes, turnout, the lot. Call it only after the tally rows are gone,
+ * so a crash between the two leaves the poll row behind to be retried rather
+ * than orphaning counters nothing can find.
+ */
+export function deletePoll(pollId: string): void {
   const db = authDb();
-  const txn = db.transaction((): number => {
-    const polls = db
-      .prepare(
-        `SELECT poll_id FROM polls
-          WHERE tokens_purged = 0 AND finalized_at IS NOT NULL AND finalized_at < ?`,
-      )
-      .all(cutoffIso) as { poll_id: string }[];
-    for (const p of polls) {
-      db.prepare('DELETE FROM ballot_tokens WHERE poll_id = ?').run(p.poll_id);
-      db.prepare('UPDATE polls SET tokens_purged = 1, emails_purged = 1 WHERE poll_id = ?').run(
-        p.poll_id,
-      );
-    }
-    return polls.length;
-  });
-  return txn();
+  db.transaction(() => {
+    db.prepare('DELETE FROM ballot_tokens WHERE poll_id = ?').run(pollId);
+    db.prepare('DELETE FROM polls WHERE poll_id = ?').run(pollId);
+  })();
 }
 
 export function listExpiredOpenPolls(nowIso: string): Poll[] {

@@ -1,3 +1,4 @@
+import { RETENTION_DAYS_AFTER_END } from '../domain/validation.js';
 import * as authRepo from '../repos/authRepo.js';
 import * as tallyRepo from '../repos/tallyRepo.js';
 import { loadPoll } from './lifecycle.js';
@@ -22,13 +23,15 @@ export interface PollView {
   configHash: string;
   voterCount: number;
   turnout: number;
+  /** §6.4 — when this poll and everything it produced are deleted. */
+  deletesAt: string | null;
   /** FR-4.2 — present only when the poll is completed. */
   results: Results | null;
 }
 
 function turnoutOf(poll: authRepo.Poll): number {
-  // Once token rows are purged (§6.4) the frozen count is the record.
-  if (poll.tokensPurged) return poll.finalBallotCount ?? 0;
+  // Ballots live exactly as long as their poll does (§6.4), so the live count
+  // is always available while the poll is readable at all.
   return authRepo.countConsumed(poll.pollId);
 }
 
@@ -78,6 +81,11 @@ export function getPollView(pollId: string): PollView | null {
     configHash: poll.configHash,
     voterCount: poll.voterCount,
     turnout,
+    deletesAt: poll.finalizedAt
+      ? new Date(
+          new Date(poll.finalizedAt).getTime() + RETENTION_DAYS_AFTER_END * 24 * 3600_000,
+        ).toISOString()
+      : null,
     results: null,
   };
 

@@ -103,13 +103,42 @@ vote, not invented by the tool afterwards. *(`src/web/views/pages.ts`)*
 
 ### Q9 — Retention of completed polls
 
-**Decision: indefinite.**
+**Decision: everything is deleted 7 days after the poll ends.**
 
-The tally of a completed poll *is* the decision record, and it contains no personal data at all —
-three columns, no identity, no time. Auto-purging it after 12 months would destroy the only
-durable evidence of what was decided while protecting nothing. The identifying material has its
-own, much shorter clock: roster addresses are purged at completion, and token hashes 30 days
-after that. *(`src/services/lifecycle.ts`)*
+Not indefinite. Seven days after a poll leaves `open` — completed, failed or cancelled alike —
+the poll row, its ballot tokens and its tally rows are all deleted, and `/p/:poll_id` returns
+404. Roster addresses still go earlier, at completion.
+
+The trade-off is real and worth stating plainly: **Voto stops being the record of what was
+decided.** A cofounder who wants to point at last month's vote will find a 404. That is
+acceptable only because the alternative — an indefinitely retained tally on a small-N poll — is
+itself a disclosure risk: with 3 voters and a unanimous result, that row is a permanent record
+of how three named people voted, sitting on a volume, in every backup snapshot, forever. A
+7-day window means the tool holds that exposure for a week rather than for years.
+
+So the app says so, loudly and in four places: the create form, the ballot page, the results
+page, and both the invite and results emails, the last three naming the exact deletion date.
+A retention rule nobody is told about is a data-loss bug the first time it fires. Write the
+decision down somewhere that is meant to hold records.
+
+Deletion is enforced twice, like the voting deadline: by the 60-second sweeper, and lazily on
+every read, so a poll is never served past its window even if the sweeper has not run.
+*(`src/services/lifecycle.ts`, `RETENTION_DAYS_AFTER_END` in `src/domain/validation.ts`)*
+
+### Voting duration — standard 3, 5 or 7 days
+
+**Decision: three fixed durations. No arbitrary closing time.**
+
+The PRD's FR-1.5 allowed anything from 15 minutes to 14 days. Fixed durations are better on two
+counts. A deadline is a lever — "closes in 40 minutes" is a way to shape who manages to vote at
+all, and in a tool whose entire purpose is to stop the convener putting a thumb on the scale,
+that lever should not exist. And a standard duration is legible: every voter knows what "3 days"
+means without doing arithmetic against a timestamp in someone else's timezone.
+
+`closes_at` is derived from the chosen duration at creation and is still stored UTC and still
+part of the config fingerprint, so the deadline remains something voters can verify against each
+other. There is no code path that accepts a caller-supplied closing time.
+*(`resolveDeadline` in `src/domain/validation.ts`)*
 
 ### Q10 — Read access to results
 
@@ -126,14 +155,14 @@ addresses are purged, and never exposes who voted at any point.
 
 ## One deviation from the PRD's schema, and why
 
-`polls` carries four columns beyond the PRD's table: `finalized_at`, `final_ballot_count`,
-`emails_purged` and `tokens_purged`.
+`polls` carries three columns beyond the PRD's table: `finalized_at`, `final_ballot_count` and
+`emails_purged`.
 
-They exist to make §6.4's retention policy implementable without breaking §4's FR-4.5 integrity
-check. Purging token rows 30 days after completion would otherwise drop `consumed_count` to zero
-and turn every old poll's verdict into `INVALID`. So the count is frozen onto the poll row at
-finalisation, before anything is purged.
+`finalized_at` is what the 7-day retention clock runs on — it records when the poll ended, not
+when any person acted. `final_ballot_count` freezes the turnout at finalisation so the FR-4.5
+integrity verdict does not depend on re-counting rows. `emails_purged` makes FR-4.7's purge
+idempotent across repeated result renders.
 
-All four are poll-level aggregates. None records when an individual acted, and none is a join
+All three are poll-level aggregates. None records when an individual acted, and none is a join
 key. `tally.sqlite` is unchanged from the PRD: three columns, `WITHOUT ROWID`, and
 `scripts/check-air-gap.mjs` fails the build if that ever stops being true.

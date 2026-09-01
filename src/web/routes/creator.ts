@@ -98,7 +98,7 @@ export async function creatorRoutes(app: FastifyInstance): Promise<void> {
       question: String(body.question ?? ''),
       rawOptions: asArray(body.options),
       rawVoters: String(body.voters ?? ''),
-      rawClosesAt: String(body.closes_at ?? ''),
+      rawDurationDays: body.duration_days,
       creatorEmail: creator,
       creatorVotes: checkboxOn(body.creator_votes),
       allowAbstain: checkboxOn(body.allow_abstain),

@@ -9,8 +9,17 @@ import { castVote } from '../src/services/voteService.js';
 import { getPollView } from '../src/services/resultsService.js';
 import { sweepExpiredPolls } from '../src/services/lifecycle.js';
 import { cancelPoll, createPoll } from '../src/services/pollService.js';
+import { ALLOWED_DURATION_DAYS, RETENTION_DAYS_AFTER_END } from '../src/domain/validation.js';
 import { hashToken } from '../src/domain/crypto.js';
-import { clearMail, flush, inFuture, installCapturingTransport, makePoll, sentMail } from './helpers.js';
+import {
+  DAY_MS,
+  clearMail,
+  flush,
+  installCapturingTransport,
+  makePoll,
+  rewindClock,
+  sentMail,
+} from './helpers.js';
 
 /**
  * Appendix A — the acceptance criteria for the privacy guarantee. Each test
@@ -133,7 +142,7 @@ describe('Appendix A — a poll that expires short of 100% leaves no tallies (FR
     expect(tallyRepo.sumTallies(pollId)).toBe(4);
 
     // Walk the clock past the deadline and sweep.
-    sweepExpiredPolls(new Date(Date.now() + 2 * 3600_000));
+    sweepExpiredPolls(new Date(Date.now() + 4 * DAY_MS));
 
     expect(tallyRepo.tallyRowCount(pollId)).toBe(0);
     const view = getPollView(pollId);
@@ -143,15 +152,9 @@ describe('Appendix A — a poll that expires short of 100% leaves no tallies (FR
   });
 
   it('lazy evaluation fails the poll even if the sweeper never runs', async () => {
-    const { pollId, invites } = await makePoll({ minutes: 20 });
+    const { pollId, invites } = await makePoll();
     castVote({ kind: 'token', token: invites[0]!.token }, 0);
-
-    authRepo.setStatus(pollId, 'open');
-    const auth = new Database(path.join(config.DATA_DIR, 'auth.sqlite'));
-    auth
-      .prepare("UPDATE polls SET closes_at = ?, status = 'open', finalized_at = NULL WHERE poll_id = ?")
-      .run(new Date(Date.now() - 1000).toISOString(), pollId);
-    auth.close();
+    rewindClock(pollId, { closesAtMsAgo: 1000 });
 
     const view = getPollView(pollId); // a plain read is enough
     expect(view?.status).toBe('failed');
@@ -257,6 +260,92 @@ describe('Appendix A — logs leak nothing', () => {
   });
 });
 
+describe('retention — a poll is deleted 7 days after it ends (§6.4)', () => {
+  it('survives right up to the window, then is deleted entirely by the sweeper', async () => {
+    const { pollId, invites } = await makePoll();
+    for (const invite of invites) castVote({ kind: 'token', token: invite.token }, 0);
+    expect(getPollView(pollId)?.results?.integrity).toBe('PASS');
+
+    // One day short of the window: still there, still readable.
+    rewindClock(pollId, { finalizedMsAgo: (RETENTION_DAYS_AFTER_END - 1) * DAY_MS });
+    sweepExpiredPolls();
+    expect(getPollView(pollId)?.results?.integrity).toBe('PASS');
+
+    // Past the window: the poll, its ballots and its counts all go.
+    rewindClock(pollId, { finalizedMsAgo: (RETENTION_DAYS_AFTER_END + 1) * DAY_MS });
+    const swept = sweepExpiredPolls();
+    expect(swept.deleted).toBe(1);
+
+    expect(getPollView(pollId)).toBeNull();
+    expect(authRepo.getPoll(pollId)).toBeNull();
+    expect(authRepo.countTokens(pollId)).toBe(0);
+    expect(tallyRepo.tallyRowCount(pollId)).toBe(0);
+  });
+
+  it('deletes on a plain read even if the sweeper never runs', async () => {
+    const { pollId, invites } = await makePoll();
+    for (const invite of invites) castVote({ kind: 'token', token: invite.token }, 0);
+    rewindClock(pollId, { finalizedMsAgo: (RETENTION_DAYS_AFTER_END + 1) * DAY_MS });
+
+    expect(getPollView(pollId)).toBeNull(); // the read itself deletes it
+    expect(authRepo.getPoll(pollId)).toBeNull();
+    expect(tallyRepo.tallyRowCount(pollId)).toBe(0);
+  });
+
+  it('deletes failed and cancelled polls on the same clock', async () => {
+    const failed = await makePoll();
+    rewindClock(failed.pollId, { closesAtMsAgo: 1000 });
+    getPollView(failed.pollId); // fails it
+    rewindClock(failed.pollId, { finalizedMsAgo: (RETENTION_DAYS_AFTER_END + 1) * DAY_MS });
+
+    const cancelled = await makePoll();
+    cancelPoll(cancelled.pollId, 'ravi@example.com');
+    rewindClock(cancelled.pollId, { finalizedMsAgo: (RETENTION_DAYS_AFTER_END + 1) * DAY_MS });
+
+    expect(sweepExpiredPolls().deleted).toBe(2);
+    expect(authRepo.getPoll(failed.pollId)).toBeNull();
+    expect(authRepo.getPoll(cancelled.pollId)).toBeNull();
+  });
+
+  it('leaves an open poll alone however old it is', async () => {
+    const { pollId } = await makePoll({ durationDays: 7 });
+    // finalized_at is null while a poll is open, so the retention clock has not started.
+    expect(sweepExpiredPolls().deleted).toBe(0);
+    expect(authRepo.getPoll(pollId)).not.toBeNull();
+  });
+
+  it('a deleted poll cannot be voted in, and says nothing about having existed', async () => {
+    const { pollId, invites } = await makePoll();
+    for (const invite of invites.slice(0, 2)) castVote({ kind: 'token', token: invite.token }, 0);
+    rewindClock(pollId, { closesAtMsAgo: 1000 });
+    getPollView(pollId);
+    rewindClock(pollId, { finalizedMsAgo: (RETENTION_DAYS_AFTER_END + 1) * DAY_MS });
+
+    const result = castVote({ kind: 'token', token: invites[2]!.token }, 0);
+    // The same 404 an address that never existed gets.
+    expect(result.kind).toBe('unknown');
+    expect(authRepo.getPoll(pollId)).toBeNull();
+  });
+
+  it('tells voters the deletion date on every page that shows the poll', async () => {
+    const { pollId, invites } = await makePoll();
+    for (const invite of invites) castVote({ kind: 'token', token: invite.token }, 0);
+
+    const view = getPollView(pollId);
+    const finalizedAt = authRepo.getPoll(pollId)!.finalizedAt!;
+    expect(view?.deletesAt).toBe(
+      new Date(new Date(finalizedAt).getTime() + RETENTION_DAYS_AFTER_END * DAY_MS).toISOString(),
+    );
+  });
+
+  it('warns about deletion in the invite email', async () => {
+    await makePoll();
+    for (const { body } of sentMail()) {
+      expect(body.text).toMatch(/deleted 7 days after voting ends/);
+    }
+  });
+});
+
 describe('cancellation destroys the count (US-4)', () => {
   it('deletes tallies, purges addresses and tells nobody the partial result', async () => {
     const { pollId, invites } = await makePoll();
@@ -295,7 +384,7 @@ describe('creation refuses what it cannot promise', () => {
       question: 'Ship it?',
       rawOptions: ['Yes', 'No'],
       rawVoters: 'a@example.com, b@example.com',
-      rawClosesAt: inFuture(60),
+      rawDurationDays: 3,
       creatorEmail: 'ravi@example.com',
       creatorVotes: false,
       allowAbstain: false,
@@ -304,19 +393,45 @@ describe('creation refuses what it cannot promise', () => {
     if (!result.ok) expect(result.error).toMatch(/at least 3 voters/);
   });
 
-  it('rejects a deadline inside 15 minutes and beyond 14 days', () => {
-    for (const minutes of [5, 15 * 24 * 60]) {
+  it('accepts only the standard 3, 5 and 7 day durations', async () => {
+    for (const days of [0, 1, 2, 4, 6, 8, 14, -3, 3.5, 'soon', '', null, undefined]) {
       const result = createPoll({
         question: 'Ship it?',
         rawOptions: ['Yes', 'No'],
         rawVoters: 'a@example.com, b@example.com, c@example.com',
-        rawClosesAt: inFuture(minutes),
+        rawDurationDays: days,
         creatorEmail: 'ravi@example.com',
         creatorVotes: false,
         allowAbstain: false,
       });
-      expect(result.ok).toBe(false);
+      expect(result.ok, `duration ${String(days)} should be rejected`).toBe(false);
+      if (!result.ok) expect(result.error).toMatch(/3, 5, 7 days/);
     }
+
+    for (const days of ALLOWED_DURATION_DAYS) {
+      const made = await makePoll({ durationDays: days });
+      const poll = authRepo.getPoll(made.pollId)!;
+      // The deadline is derived from the duration, not supplied by the caller,
+      // and lands exactly N days after creation.
+      expect(new Date(poll.closesAt).getTime() - new Date(poll.createdAt).getTime()).toBe(
+        days * DAY_MS,
+      );
+    }
+  });
+
+  it('accepts a duration submitted as a form string', async () => {
+    installCapturingTransport();
+    const result = createPoll({
+      question: 'Ship it?',
+      rawOptions: ['Yes', 'No'],
+      rawVoters: 'a@example.com, b@example.com, c@example.com',
+      rawDurationDays: '5',
+      creatorEmail: 'ravi@example.com',
+      creatorVotes: false,
+      allowAbstain: false,
+    });
+    expect(result.ok).toBe(true);
+    await flush();
   });
 
   it('adds the creator to the roster only when they opt in (FR-1.4)', async () => {
@@ -325,7 +440,7 @@ describe('creation refuses what it cannot promise', () => {
       question: 'Ship it?',
       rawOptions: ['Yes', 'No'],
       rawVoters: 'a@example.com, b@example.com, c@example.com',
-      rawClosesAt: inFuture(60),
+      rawDurationDays: 3,
       creatorEmail: 'ravi@example.com',
       creatorVotes: true,
       allowAbstain: false,

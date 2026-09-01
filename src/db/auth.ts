@@ -31,10 +31,9 @@ CREATE TABLE IF NOT EXISTS polls (
 
   -- Poll-level bookkeeping. All aggregates; none of it is voter-identifying,
   -- and none of it records when any individual acted.
-  finalized_at         TEXT,                 -- when the poll left 'open'
+  finalized_at         TEXT,                 -- when the poll left 'open'; starts the 7-day clock
   final_ballot_count   INTEGER,              -- consumed count frozen at finalisation
-  emails_purged        INTEGER NOT NULL DEFAULT 0 CHECK (emails_purged IN (0,1)),
-  tokens_purged        INTEGER NOT NULL DEFAULT 0 CHECK (tokens_purged IN (0,1))
+  emails_purged        INTEGER NOT NULL DEFAULT 0 CHECK (emails_purged IN (0,1))
 );
 
 CREATE TABLE IF NOT EXISTS ballot_tokens (

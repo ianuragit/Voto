@@ -1,0 +1,35 @@
+{
+  "name": "voto",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Voto — anonymous, all-or-nothing decision polling for founding teams (codename Quorum)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check:airgap": "node scripts/check-air-gap.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify": "npm run check:airgap && npm run typecheck && npm run test",
+    "postinstall": "node -e \"process.exit(0)\""
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/formbody": "^8.0.2",
+    "better-sqlite3": "^11.10.0",
+    "fastify": "^5.2.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.13.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}

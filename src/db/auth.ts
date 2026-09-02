@@ -2,6 +2,8 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { config } from '../config.js';
+import { ensureColumns, type ColumnSpec } from './migrate.js';
+import { log } from '../logging.js';
 
 /**
  * THE AUTH STORE — auth.sqlite (§6.1).
@@ -52,6 +54,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_code ON ballot_tokens(poll_id, code_hash);
 CREATE INDEX IF NOT EXISTS idx_poll ON ballot_tokens(poll_id);
 `;
 
+/**
+ * Columns added after the first release. `CREATE TABLE IF NOT EXISTS` cannot
+ * introduce them on a volume that already has the table, so they are repaired
+ * on open. Anything added here in future must carry a default.
+ */
+const ADDED_COLUMNS: ColumnSpec = {
+  polls: {
+    finalized_at: 'TEXT',
+    final_ballot_count: 'INTEGER',
+    results_notified: 'INTEGER NOT NULL DEFAULT 0',
+    emails_purged: 'INTEGER NOT NULL DEFAULT 0',
+  },
+  ballot_tokens: {
+    delivery_status: "TEXT NOT NULL DEFAULT 'queued'",
+  },
+};
+
 let db: Database.Database | null = null;
 
 export function authDb(): Database.Database {
@@ -60,6 +79,8 @@ export function authDb(): Database.Database {
   const handle = new Database(path.join(config.DATA_DIR, 'auth.sqlite'));
   handle.pragma('busy_timeout = 5000'); // §10 — DB locked -> 503, never a partial write
   handle.exec(SCHEMA);
+  const added = ensureColumns(handle, ADDED_COLUMNS);
+  if (added.length > 0) log.warn('auth store schema brought up to date', { added: added.join(',') });
   db = handle;
   return db;
 }

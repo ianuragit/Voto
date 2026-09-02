@@ -308,6 +308,16 @@ Push to the branch. Railway rebuilds and restarts the single replica. The volume
 poll on it, survives. In-flight polls are unaffected: nothing is held in memory except rate-limit
 counters, and a restart re-sweeps deadlines at boot.
 
+Schema changes are applied to the existing volume automatically: any column the running code
+expects but the database lacks is added on open, and the boot log says which
+(`auth store schema brought up to date`). Nothing is dropped, renamed or retyped, so a rollback
+to an older build still runs against the same file. This matters because the tables are created
+with `CREATE TABLE IF NOT EXISTS`, which is a no-op on a volume that already has them — without
+the repair, a new column means the first query touching it fails and the container crash-loops.
+
+If a deploy does fail to boot, the log names the stage it failed in and prints the full error
+rather than a bare "failed to start".
+
 ---
 
 ## Environment variables
@@ -463,6 +473,8 @@ anywhere in this application and no analytics of any kind.
 | Deadline passes below 100% turnout | Status → `failed`, tallies deleted, turnout shown, counts never |
 | Process dies between completing a poll and mailing the result | The next sweep (or boot) sends it; delivery is claimed atomically so it is sent exactly once |
 | Email bounces | `delivery_status = 'bounced'`, creator warned that the poll cannot complete |
+| The volume holds a database from an older release | Missing columns are added on open (`auth store schema brought up to date`). Nothing is ever dropped or retyped, so rolling back to an older build is safe |
+| Startup fails for any reason | The crash names the stage — `build server`, `open databases and sweep deadlines`, `listen` — and prints the full error and stack, with any email address masked |
 | Provider rejects the send (bad URL, key or from-address) | Marked `failed` immediately with the provider's error code logged — no pointless retries, since a 4xx cannot succeed on a second attempt. Diagnose with `npm run check:email` |
 | Voter clicks their link twice | Second render is harmless; a second vote is a `409` |
 | Mail scanner pre-fetches the link | Nothing consumed — `GET` never mutates |

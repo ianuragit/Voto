@@ -1,97 +1,116 @@
 #!/usr/bin/env node
 /**
- * Checks the ZeptoMail configuration without sending a poll.
+ * Checks the SMTP configuration without running a poll.
  *
- *   npm run check:email                 # config + credential check only
+ *   npm run check:email                 # connect + authenticate only
  *   npm run check:email you@domain.com  # also sends one real test email
  *
  * Run it from a Railway shell when invites are not arriving. It reports the
- * provider's own error codes, which name the problem far better than the
- * delivery status on the console does.
+ * SMTP reply code, which names the problem far better than a delivery status
+ * on the console does.
  *
- * It never prints the API key, and it prints a recipient only if you passed
+ * It never prints the password, and it prints a recipient only if you passed
  * one on the command line yourself.
  */
+import nodemailer from 'nodemailer';
 
-const SEND_PATH = '/v1.1/email';
-
-const raw = process.env.ZEPTOMAIL_API_URL ?? 'https://api.zeptomail.com/v1.1/email';
-const key = process.env.ZEPTOMAIL_API_KEY ?? '';
-const from = process.env.ZEPTOMAIL_FROM_ADDRESS ?? '';
-const fromName = process.env.ZEPTOMAIL_FROM_NAME ?? 'Voto';
+const host = (process.env.SMTP_HOST ?? '')
+  .trim()
+  .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+  .replace(/\/.*$/, '')
+  .replace(/:\d+$/, '')
+  .toLowerCase();
+const port = Number(process.env.SMTP_PORT ?? 587);
+const secureRaw = process.env.SMTP_SECURE;
+const secure = secureRaw ? /^(1|true|yes|on)$/i.test(secureRaw) : port === 465;
+const user = process.env.SMTP_USER ?? '';
+const pass = process.env.SMTP_PASSWORD ?? '';
+const from = process.env.MAIL_FROM_ADDRESS ?? '';
+const fromName = process.env.MAIL_FROM_NAME ?? 'Voto';
 const to = process.argv[2];
 
-function normalize(value) {
-  const url = new URL(value);
-  const path = url.pathname.replace(/\/+$/, '');
-  return `${url.origin}${path === '' ? SEND_PATH : path}`;
-}
+console.log(`SMTP_HOST         ${host || 'MISSING'}`);
+console.log(`SMTP_PORT         ${port}${secureRaw ? '' : '  (SMTP_SECURE derived from port)'}`);
+console.log(`SMTP_SECURE       ${secure}  ${secure ? '(implicit TLS)' : '(STARTTLS)'}`);
+console.log(`SMTP_USER         ${user || 'MISSING'}`);
+console.log(`SMTP_PASSWORD     ${pass ? `set (${pass.length} chars)` : 'MISSING'}`);
+console.log(`MAIL_FROM_ADDRESS ${from || 'MISSING'}`);
 
-let endpoint;
-try {
-  endpoint = normalize(raw);
-} catch {
-  console.error(`✗ ZEPTOMAIL_API_URL is not a URL: ${raw}`);
+const missing = [
+  !host && 'SMTP_HOST',
+  !user && 'SMTP_USER',
+  !pass && 'SMTP_PASSWORD',
+  !from && 'MAIL_FROM_ADDRESS',
+].filter(Boolean);
+
+if (missing.length > 0) {
+  console.error(`\n✗ Missing: ${missing.join(', ')}`);
+  console.error('  Without these Voto runs in dry-run and delivers nothing.');
   process.exit(1);
 }
 
-console.log(`ZEPTOMAIL_API_URL   ${raw}`);
-if (endpoint !== raw) console.log(`  -> normalized to   ${endpoint}`);
-console.log(`ZEPTOMAIL_API_KEY   ${key ? `set (${key.length} chars)` : 'MISSING — Voto runs in dry-run and sends nothing'}`);
-console.log(`FROM                ${from || 'MISSING'}`);
-
-if (!key || !from) {
-  console.error('\n✗ Set ZEPTOMAIL_API_KEY and ZEPTOMAIL_FROM_ADDRESS, then run this again.');
-  process.exit(1);
+if (secure && port === 587) {
+  console.log('\n! Port 587 with implicit TLS usually hangs. Use 465, or unset SMTP_SECURE.');
 }
 
-// With no recipient we still exercise auth and the endpoint: the provider
-// validates the credential before it validates the payload.
-const recipient = to ?? 'probe@example.invalid';
-const res = await fetch(endpoint, {
-  method: 'POST',
-  headers: {
-    Authorization: `Zoho-enczapikey ${key}`,
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
-  },
-  body: JSON.stringify({
-    from: { address: from, name: fromName },
-    to: [{ email_address: { address: recipient } }],
-    subject: 'Voto configuration check',
-    textbody: 'If you are reading this, Voto can send mail.',
-    track_clicks: false,
-    track_opens: false,
-  }),
+const transporter = nodemailer.createTransport({
+  host,
+  port,
+  secure,
+  requireTLS: !secure,
+  auth: { user, pass },
+  connectionTimeout: 10_000,
+  greetingTimeout: 10_000,
+  logger: false,
 });
 
-const text = await res.text();
-let parsed;
+const explain = (err) => {
+  const code = err?.responseCode;
+  const hint =
+    err?.code === 'EAUTH' || code === 535
+      ? 'The credential was refused. For ZeptoMail the username is the literal string "emailapikey" and the password is the Mail Agent SMTP token — which is NOT the Send Mail API token.'
+      : err?.code === 'ECONNECTION' || err?.code === 'ECONNREFUSED' || err?.code === 'ETIMEDOUT'
+        ? 'Could not reach the relay. Check SMTP_HOST and SMTP_PORT, and that the platform allows outbound SMTP on that port.'
+        : err?.code === 'ESOCKET'
+          ? 'TLS negotiation failed — usually SMTP_SECURE not matching the port. Use secure=true only on 465.'
+          : code >= 500
+            ? 'The server refused permanently. Check that MAIL_FROM_ADDRESS is on a verified sending domain.'
+            : null;
+  console.log(`\n✗ ${['smtp', code, err?.code].filter(Boolean).join('_')}`);
+  if (hint) console.log(`\n→ ${hint}`);
+};
+
 try {
-  parsed = JSON.parse(text);
-} catch {
-  parsed = null;
+  await transporter.verify();
+  console.log('\n✓ Relay reachable and credential accepted.');
+} catch (err) {
+  explain(err);
+  transporter.close();
+  process.exit(1);
 }
 
-console.log(`\nHTTP ${res.status}`);
-
-if (res.ok) {
-  console.log(to ? `✓ Sent. Check ${to} — including its spam folder.` : '✓ Endpoint and credential are good.');
-  process.exit(0);
+if (to) {
+  try {
+    await transporter.sendMail({
+      from: { address: from, name: fromName },
+      to,
+      subject: 'Voto configuration check',
+      text: 'If you are reading this, Voto can send mail.',
+    });
+    console.log(`✓ Sent. Check ${to} — including its spam folder.`);
+  } catch (err) {
+    explain(err);
+    transporter.close();
+    process.exit(1);
+  }
+} else {
+  console.log('\nPass an address to send a real test: npm run check:email you@yourdomain.com');
 }
 
-const err = parsed?.error ?? {};
-const subCodes = Array.isArray(err.details)
-  ? err.details.map((d) => d?.code).filter(Boolean).join(', ')
-  : '';
-console.log(`✗ ${err.code ?? '(no code)'} ${err.message ?? ''}${subCodes ? ` [${subCodes}]` : ''}`);
+console.log(
+  '\n! Voto cannot disable click/open tracking over SMTP — the API parameters are gone.\n' +
+    '  Turn both OFF in the provider console. A tracked link records when each\n' +
+    '  person opened their ballot, which is what the privacy design exists to prevent.',
+);
 
-const hint = {
-  404: 'The URL has no path. Set ZEPTOMAIL_API_URL to the full endpoint, ending in /v1.1/email.',
-  403: 'The path is wrong — often a trailing slash. It must end in /v1.1/email with no slash after it.',
-  401: 'The API key is wrong. Use a Mail Agent "Send Mail" token, sent as Zoho-enczapikey.',
-  400: 'The payload or the from-address was rejected. The from-address must be on a verified domain.',
-}[res.status];
-if (hint) console.log(`\n→ ${hint}`);
-if (!to) console.log('\nPass an address to send a real test: npm run check:email you@yourdomain.com');
-process.exit(1);
+transporter.close();

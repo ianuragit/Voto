@@ -4,7 +4,7 @@ import { summarise } from '../domain/results.js';
 import * as authRepo from '../repos/authRepo.js';
 import * as tallyRepo from '../repos/tallyRepo.js';
 import { pollResultsEmail, resultsWithheldEmail } from '../email/templates.js';
-import { sendEmail } from '../email/zeptomail.js';
+import { sendEmail } from '../email/mailer.js';
 
 /**
  * Telling everyone how it ended.

@@ -51,6 +51,11 @@ anything — not the creator, not the person who runs the server.
   consumed with a counter incrementing. Voto removes every stored correlate — no timestamps,
   no insertion order, no per-vote rows — but it cannot defeat an observer watching in real
   time. Restrict production shell access accordingly.
+- **Mail-provider tracking is not enforceable from here.** Voto sends over SMTP, which has no
+  per-message parameter to disable click and open tracking — so that setting lives in the
+  provider console alone. Leave it on and the provider records when each voter opened their
+  ballot, which defeats §6.2 no matter what this code does. Turn it off, and re-check it after
+  any change to the Mail Agent.
 - **Railway's edge logs.** The platform logs request paths and source IPs outside our control.
   Because the vote is a `POST` to a shared path with the option in the body, those logs reveal
   *that* an IP voted, never *what* they voted. Documented, not solved.
@@ -126,12 +131,15 @@ and DMARC, the invite emails land in spam and the poll silently fails**, because
 
 1. Create a ZeptoMail account and add your sending domain (e.g. `yourdomain.com`).
 2. Add the SPF, DKIM and DMARC DNS records ZeptoMail gives you, and wait for verification.
-3. Create a **Mail Agent**, then generate a **Send Mail token** for it. Copy it — it is shown once.
-4. In the Mail Agent's settings, **turn off click tracking and open tracking.** This matters:
-   a tracked link creates a server-side record tying a person to the moment they opened their
-   ballot, which is exactly what the privacy architecture exists to prevent. Voto also sends
-   `track_clicks: false` and `track_opens: false` on every request, but the account setting is
-   the one that binds.
+3. Create a **Mail Agent**, then open its **SMTP** settings and generate an **SMTP token**.
+   Copy it — it is shown once. Note this is *not* the Send Mail API token: ZeptoMail issues the
+   two separately, and the API one will be refused with `535` over SMTP.
+4. In the Mail Agent's settings, **turn off click tracking and open tracking.**
+   **Over SMTP this setting is the only control there is.** A tracked link creates a
+   server-side record tying a person to the moment they opened their ballot — precisely what the
+   privacy architecture exists to prevent — and unlike the HTTP API, SMTP has no per-message
+   parameter Voto can send to force it off. Check it, and check it again after any change to the
+   Mail Agent.
 5. Send yourself a test email from the ZeptoMail console and confirm it reaches the inbox, not
    spam.
 
@@ -181,11 +189,16 @@ PUBLIC_BASE_URL=https://voto.up.railway.app
 SESSION_SECRET=<paste output of: openssl rand -base64 48>
 ALLOWED_CREATORS=ravi@yourdomain.com,priya@yourdomain.com
 
-ZEPTOMAIL_API_URL=https://api.zeptomail.com/v1.1/email
-ZEPTOMAIL_API_KEY=<your ZeptoMail Send Mail token>
-ZEPTOMAIL_FROM_ADDRESS=voto@yourdomain.com
-ZEPTOMAIL_FROM_NAME=Voto
-ZEPTOMAIL_BOUNCE_ADDRESS=bounces@yourdomain.com
+# SMTP. smtp.zeptomail.in for India-region accounts, smtp.zeptomail.com otherwise.
+SMTP_HOST=smtp.zeptomail.com
+SMTP_PORT=587
+SMTP_USER=emailapikey
+SMTP_PASSWORD=<the Mail Agent SMTP token, not the API token>
+
+MAIL_FROM_ADDRESS=voto@yourdomain.com
+MAIL_FROM_NAME=Voto
+MAIL_BOUNCE_ADDRESS=bounces@yourdomain.com
+
 ZEPTOMAIL_WEBHOOK_SECRET=<any long random string you also paste into ZeptoMail>
 ```
 
@@ -236,7 +249,33 @@ curl https://<your-domain>/healthz
 
 Railway's health check hits the same path and will not promote a deploy that fails it.
 
-### Step 7 — Point the bounce webhook at the service
+### Step 7 — Confirm mail actually sends
+
+Before anyone depends on it, check the credential and the endpoint from a Railway shell:
+
+```bash
+npm run check:email                      # endpoint + credential only, sends nothing
+npm run check:email you@yourdomain.com   # sends one real test email
+```
+
+It connects, authenticates, and prints the SMTP reply code with what to do about it. The four
+that bite:
+
+| Failure | Meaning | Fix |
+|---|---|---|
+| `535` / `EAUTH` | Credential refused | `SMTP_USER` is the literal string `emailapikey`; `SMTP_PASSWORD` is the Mail Agent **SMTP** token, not the Send Mail API token |
+| `ECONNREFUSED` / `ETIMEDOUT` | Relay unreachable | Check `SMTP_HOST`/`SMTP_PORT`, and that the platform permits outbound SMTP on that port |
+| `ESOCKET` | TLS negotiation failed | `SMTP_SECURE` must match the port — implicit TLS on 465 only. Leave it unset and Voto derives it |
+| `550` / `EENVELOPE` | Sender refused | `MAIL_FROM_ADDRESS` must be on a verified sending domain — back to step 0 |
+
+The service also runs this check itself at boot and logs `smtp ready`, or an error naming the
+reply code, so a broken relay shows up in the deploy logs rather than three days later.
+
+Invites that never arrive are the worst failure this app has, because a poll needs 100% turnout:
+one undelivered invite means the poll cannot complete and fails at its deadline. Voto marks such
+addresses `failed` on the creator's console, but checking here first is cheaper.
+
+### Step 8 — Point the bounce webhook at the service
 
 1. In ZeptoMail: **Mail Agent → Webhooks → Add webhook**.
 2. URL: `https://<your-domain>/webhooks/zeptomail`
@@ -249,13 +288,13 @@ Unsigned callbacks are rejected with a 401. A bounced address raises a creator-v
 saying the poll cannot complete until it is fixed — which is true, since every invited voter
 must vote.
 
-### Step 8 — Run one real poll end to end before you trust it
+### Step 9 — Run one real poll end to end before you trust it
 
 Create a throwaway 3-person poll among addresses you control, vote from all three, and confirm:
 the invites arrive in inboxes, the two-tap flow works on a phone, and the results page shows
 `Integrity: PASS` with ballots counted equal to roster size.
 
-### Step 9 — Back it up
+### Step 10 — Back it up
 
 Railway volume backups: **Service → Volume → Backups**. Schedule a nightly snapshot.
 
@@ -282,11 +321,14 @@ counters, and a restart re-sweeps deadlines at boot.
 | `DATA_DIR` | **yes** | `./data` | Directory holding both SQLite files. `/data` on Railway |
 | `SESSION_SECRET` | **yes** | — | HMAC key for creator sessions, sign-in links, CSRF, and rate-limit keying. Boot fails in production without it |
 | `ALLOWED_CREATORS` | **yes** | — | Comma-separated addresses allowed to create polls. Boot fails in production if empty |
-| `ZEPTOMAIL_API_URL` | no | `https://api.zeptomail.com/v1.1/email` | Use `api.zeptomail.in` for India-region accounts |
-| `ZEPTOMAIL_API_KEY` | **yes** | — | Send Mail token. Without it, Voto runs in dry-run and prints subjects instead of sending |
-| `ZEPTOMAIL_FROM_ADDRESS` | **yes** | — | Must be on the verified sending domain |
-| `ZEPTOMAIL_FROM_NAME` | no | `Voto` | Display name |
-| `ZEPTOMAIL_BOUNCE_ADDRESS` | no | — | Return path for bounces |
+| `SMTP_HOST` | **yes** | — | Relay hostname, e.g. `smtp.zeptomail.com` (`smtp.zeptomail.in` for India-region). A scheme, path or `:port` suffix is stripped for you |
+| `SMTP_PORT` | no | `587` | `587` STARTTLS or `465` implicit TLS |
+| `SMTP_SECURE` | no | derived | Leave unset: `true` on 465, `false` elsewhere. Setting `true` on 587 hangs until timeout |
+| `SMTP_USER` | **yes** | — | For ZeptoMail this is the literal string `emailapikey` |
+| `SMTP_PASSWORD` | **yes** | — | Mail Agent **SMTP** token — a different credential from the Send Mail API token |
+| `MAIL_FROM_ADDRESS` | **yes** | — | Must be on the verified sending domain |
+| `MAIL_FROM_NAME` | no | `Voto` | Display name |
+| `MAIL_BOUNCE_ADDRESS` | no | — | Envelope sender (Return-Path). Bounces come back here, not to the From |
 | `ZEPTOMAIL_WEBHOOK_SECRET` | recommended | — | HMAC secret for bounce callbacks. Unsigned callbacks are rejected |
 | `ZEPTOMAIL_WEBHOOK_SIGNATURE_HEADER` | no | `x-zoho-signature` | Header carrying the callback signature |
 | `EMAIL_DRY_RUN` | no | `false` | Print emails instead of sending them |
@@ -302,7 +344,7 @@ cp .env.example .env          # then edit SESSION_SECRET and ALLOWED_CREATORS
 npm run dev                   # http://localhost:3000
 ```
 
-With no `ZEPTOMAIL_API_KEY`, Voto runs in dry-run: emails are printed as subject lines rather
+With no `SMTP_HOST`, `SMTP_USER` or `SMTP_PASSWORD`, Voto runs in dry-run: emails are printed as subject lines rather
 than sent. The magic link and code are in the printed body during development only — set
 `LOG_LEVEL=info` and read the console, or point the app at a real ZeptoMail sandbox.
 
@@ -421,6 +463,7 @@ anywhere in this application and no analytics of any kind.
 | Deadline passes below 100% turnout | Status → `failed`, tallies deleted, turnout shown, counts never |
 | Process dies between completing a poll and mailing the result | The next sweep (or boot) sends it; delivery is claimed atomically so it is sent exactly once |
 | Email bounces | `delivery_status = 'bounced'`, creator warned that the poll cannot complete |
+| Provider rejects the send (bad URL, key or from-address) | Marked `failed` immediately with the provider's error code logged — no pointless retries, since a 4xx cannot succeed on a second attempt. Diagnose with `npm run check:email` |
 | Voter clicks their link twice | Second render is harmless; a second vote is a `409` |
 | Mail scanner pre-fetches the link | Nothing consumed — `GET` never mutates |
 | Crash between consume and tally | Ballot lost, poll `at_risk`, fails at deadline, results suppressed |
@@ -447,7 +490,8 @@ invite and the results email.
 Deletion is enforced twice, like the deadline: by the 60-second sweeper, and lazily on every
 read, so a poll can never be served past its window even if the sweeper never runs.
 
-**Stack.** Node 20 (pinned), TypeScript, Fastify, `better-sqlite3`, Zod, server-rendered HTML. No
+**Stack.** Node 20 (pinned), TypeScript, Fastify, `better-sqlite3`, Zod, Nodemailer over SMTP,
+server-rendered HTML. No
 client framework, no build step for the frontend, no JavaScript shipped to the browser.
 
 **The Node version is pinned on purpose — don't bump it casually.** `better-sqlite3` is a native

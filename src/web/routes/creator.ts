@@ -12,7 +12,7 @@ import {
   resendInvites,
 } from '../../services/pollService.js';
 import { creatorSignInEmail } from '../../email/templates.js';
-import { sendEmail } from '../../email/zeptomail.js';
+import { sendEmail } from '../../email/mailer.js';
 import { checkCsrf, issueCsrf } from '../csrf.js';
 import { allow } from '../rateLimit.js';
 import { clearSession, currentCreator, mintSignInToken, redeemSignInToken, setSession } from '../session.js';

@@ -3,7 +3,7 @@ import { RETENTION_DAYS_AFTER_END } from '../domain/validation.js';
 import * as authRepo from '../repos/authRepo.js';
 import * as tallyRepo from '../repos/tallyRepo.js';
 import { pollFailedEmail } from '../email/templates.js';
-import { sendEmail } from '../email/zeptomail.js';
+import { sendEmail } from '../email/mailer.js';
 import { notifyPendingResults } from './notifications.js';
 
 /**

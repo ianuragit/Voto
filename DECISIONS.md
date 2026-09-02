@@ -172,6 +172,37 @@ addresses are purged, and never exposes who voted at any point.
 
 ---
 
+## Sending over SMTP rather than the HTTP API
+
+The PRD's §9 specified ZeptoMail's transactional HTTP API. Voto sends over SMTP instead, at the
+product owner's instruction. Nothing about the mail itself changed — same templates, same
+one-call-per-recipient, never BCC — but three things are worth recording.
+
+**The variables are provider-neutral now.** `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
+`SMTP_PASSWORD`, `MAIL_FROM_ADDRESS`, `MAIL_FROM_NAME`, `MAIL_BOUNCE_ADDRESS`. No code knows it
+is talking to ZeptoMail, so changing provider is a variable change. The bounce webhook keeps its
+`ZEPTOMAIL_*` names, because that part genuinely is ZeptoMail-specific and is unaffected by how
+mail is sent.
+
+**Tracking can no longer be disabled from code, and this is a real loss.** The API accepted
+`track_clicks: false` and `track_opens: false` on every request, so §6.2's "no tracking" rule was
+enforced per-message regardless of console settings. SMTP has no equivalent parameter. The Mail
+Agent's own setting is now the only control, which means a privacy guarantee that used to be
+belt-and-braces is now one checkbox in someone else's UI. `npm run check:email` prints a warning
+saying so on every run, and the README states it as a limitation rather than an instruction.
+
+**Failure classification is better, not worse.** SMTP reply codes say plainly whether a failure
+is temporary: 4xx retries, 5xx does not, and `EAUTH` is settled at once. That maps more precisely
+onto the retry policy than HTTP status codes did. As before, the reply *text* is never logged —
+a rejected recipient is routinely echoed inside it (`550 5.1.1 <priya@example.com> unknown`),
+so only the numeric code and nodemailer's error code survive into a log line.
+
+The relay is verified once at boot (`smtp ready`, or an error naming the code). A poll needs 100%
+turnout, so an undeliverable invite means the poll cannot complete — that belongs in the deploy
+logs, not in a post-mortem.
+
+---
+
 ## One deviation from the PRD's schema, and why
 
 `polls` carries three columns beyond the PRD's table: `finalized_at`, `final_ballot_count` and

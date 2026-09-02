@@ -1,7 +1,7 @@
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { config } from '../src/config.js';
-import { setTransport } from '../src/email/zeptomail.js';
+import { setTransport } from '../src/email/mailer.js';
 import { createPoll } from '../src/services/pollService.js';
 import type { EmailBody } from '../src/email/templates.js';
 

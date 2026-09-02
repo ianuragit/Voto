@@ -14,7 +14,7 @@ import {
 import * as authRepo from '../repos/authRepo.js';
 import * as tallyRepo from '../repos/tallyRepo.js';
 import { inviteEmail, pollCancelledEmail } from '../email/templates.js';
-import { sendEmail } from '../email/zeptomail.js';
+import { sendEmail } from '../email/mailer.js';
 
 export interface CreatePollRequest {
   question: string;

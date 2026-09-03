@@ -54,7 +54,7 @@ export async function buildServer(): Promise<FastifyInstance> {
       reply.header('Cache-Control', 'no-store, no-cache, must-revalidate, private');
       reply.header('Pragma', 'no-cache');
     }
-    if (config.isProduction) {
+    if (config.isDeployed) {
       reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     }
     return payload;

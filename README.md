@@ -204,7 +204,10 @@ ZEPTOMAIL_WEBHOOK_SECRET=<any long random string you also paste into ZeptoMail>
 
 Notes:
 
-- Do **not** set `PORT`. Railway injects it, and Voto reads it.
+- Do **not** set `PORT` or `HOST`. Railway injects `PORT`, and Voto binds every interface. Setting
+  `HOST` to a specific address the container does not hold is an `EADDRNOTAVAIL` crash loop.
+- `NODE_ENV` is optional. Voto detects the deployment from Railway's own variables, so secure
+  cookies, HSTS and `warn`-level logging apply even if `NODE_ENV` is left at `development`.
 - `DATA_DIR` must match the volume mount path from step 2 exactly.
 - `PUBLIC_BASE_URL` must match the final public domain **exactly**, including `https://` and no
   trailing slash. It is what the magic links in the invite emails are built from. Set it after
@@ -324,11 +327,11 @@ rather than a bare "failed to start".
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `NODE_ENV` | yes in prod | `development` | `production` enables secure cookies, HSTS, and `warn`-level logging |
+| `NODE_ENV` | no | `development` | Reported honestly, but **not** what security keys off. Voto detects a real deployment from platform variables (`RAILWAY_*`, `DYNO`, `FLY_APP_NAME`, …), so secure cookies, HSTS and `warn`-level logging are on even if this says `development` |
 | `PORT` | no | `3000` | Injected by Railway; don't set it manually |
-| `HOST` | no | `0.0.0.0` | Bind address |
+| `HOST` | no | `0.0.0.0` | **Leave it unset.** A host the container does not hold fails with `EADDRNOTAVAIL` and crash-loops; Voto now refuses such a value and binds every interface instead, but the fix is to not set it |
 | `PUBLIC_BASE_URL` | **yes** | `http://localhost:3000` | Origin used to build magic links. Must match the deployed domain exactly |
-| `DATA_DIR` | **yes** | `./data` | Directory holding both SQLite files. `/data` on Railway |
+| `DATA_DIR` | **yes** | `./data` | Directory holding both SQLite files — **must be an absolute path matching the volume mount** (`/data` on Railway). A relative path is container-local, so every redeploy destroys every poll; Voto logs an error at boot if it sees one on a deployment |
 | `SESSION_SECRET` | **yes** | — | HMAC key for creator sessions, sign-in links, CSRF, and rate-limit keying. Boot fails in production without it |
 | `ALLOWED_CREATORS` | **yes** | — | Comma-separated addresses allowed to create polls. Boot fails in production if empty |
 | `SMTP_HOST` | **yes** | — | Relay hostname, e.g. `smtp.zeptomail.com` (`smtp.zeptomail.in` for India-region). A scheme, path or `:port` suffix is stripped for you |
@@ -474,6 +477,9 @@ anywhere in this application and no analytics of any kind.
 | Process dies between completing a poll and mailing the result | The next sweep (or boot) sends it; delivery is claimed atomically so it is sent exactly once |
 | Email bounces | `delivery_status = 'bounced'`, creator warned that the poll cannot complete |
 | The volume holds a database from an older release | Missing columns are added on open (`auth store schema brought up to date`). Nothing is ever dropped or retyped, so rolling back to an older build is safe |
+| `HOST` names an address the container does not hold | Refused at boot with `HOST is not an address this machine holds`, and every interface is bound instead — a crash loop is not an acceptable response to one stray variable |
+| `DATA_DIR` is relative on a deployment | Logged as an error at boot: the databases are on container-local disk and every redeploy destroys them |
+| `NODE_ENV` is `development` on a real deployment | Detected from platform variables anyway. Secure cookies, HSTS and warn-level logging stay on, and the `SESSION_SECRET`/`ALLOWED_CREATORS` checks still run |
 | Startup fails for any reason | The crash names the stage — `build server`, `open databases and sweep deadlines`, `listen` — and prints the full error and stack, with any email address masked |
 | Provider rejects the send (bad URL, key or from-address) | Marked `failed` immediately with the provider's error code logged — no pointless retries, since a 4xx cannot succeed on a second attempt. Diagnose with `npm run check:email` |
 | Voter clicks their link twice | Second render is harmless; a second vote is a `409` |

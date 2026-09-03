@@ -1,4 +1,13 @@
+import os from 'node:os';
+import path from 'node:path';
 import { z } from 'zod';
+
+export function localInterfaceAddresses(): string[] {
+  return Object.values(os.networkInterfaces())
+    .flat()
+    .filter((n): n is NonNullable<typeof n> => Boolean(n))
+    .map((n) => n.address);
+}
 
 /**
  * Environment configuration. Nothing secret is ever hard-coded; everything
@@ -73,10 +82,62 @@ const schema = z.object({
 
 export type Config = z.infer<typeof schema> & {
   isProduction: boolean;
+  /**
+   * True when this is a real deployment, however NODE_ENV happens to be set.
+   * Everything security-relevant keys off this rather than off NODE_ENV,
+   * because a deployment running with NODE_ENV=development silently drops the
+   * Secure flag from cookies, drops HSTS, and skips the secret checks — which
+   * is not a thing anyone would choose, only a thing they would miss.
+   */
+  isDeployed: boolean;
+  /** The address actually bound, after rejecting one this machine cannot use. */
+  bindHost: string;
+  /** DATA_DIR is not an absolute path, so it dies with the container. */
+  dataIsEphemeral: boolean;
   logLevel: string;
   emailDryRun: boolean;
   smtpSecure: boolean;
 };
+
+const WILDCARD_HOSTS = new Set(['', '0.0.0.0', '::', '*']);
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+
+/**
+ * Platform markers. A container on a PaaS is production whatever NODE_ENV
+ * says; asking the environment is more reliable than asking a string someone
+ * had to remember to set.
+ */
+export function detectDeployment(env: NodeJS.ProcessEnv): boolean {
+  if (env.NODE_ENV === 'production') return true;
+  if (env.NODE_ENV === 'test') return false;
+  return Object.keys(env).some(
+    (key) =>
+      key.startsWith('RAILWAY_') ||
+      key === 'DYNO' ||
+      key === 'FLY_APP_NAME' ||
+      key === 'RENDER' ||
+      key === 'KUBERNETES_SERVICE_HOST',
+  );
+}
+
+/**
+ * Binding to an address the machine does not hold fails with EADDRNOTAVAIL and
+ * the container never starts. On a PaaS the only correct answer is every
+ * interface, so a HOST that is not a wildcard, not loopback, and not an
+ * address on a local interface is refused in favour of 0.0.0.0.
+ *
+ * Returns the host to bind and, when it differs, why.
+ */
+export function resolveBindHost(
+  requested: string,
+  localAddresses: string[],
+): { host: string; rejected: string | null } {
+  const host = requested.trim();
+  if (WILDCARD_HOSTS.has(host)) return { host: host === '' ? '0.0.0.0' : host, rejected: null };
+  if (LOOPBACK_HOSTS.has(host.toLowerCase())) return { host, rejected: null };
+  if (localAddresses.includes(host)) return { host, rejected: null };
+  return { host: '0.0.0.0', rejected: host };
+}
 
 /**
  * Accepts what people actually paste into a host field. A relay is given as a
@@ -111,13 +172,24 @@ export function resolveSmtpSecure(port: number, override?: string): boolean {
 function build(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = schema.parse(env);
   const isProduction = parsed.NODE_ENV === 'production';
+  const isDeployed = detectDeployment(env);
 
-  if (isProduction) {
+  // Keyed to isDeployed, not to NODE_ENV. The default secret is published in
+  // this repository, so a deployment running on it lets anyone forge a creator
+  // session — refusing to boot is the only safe answer, and it says why.
+  if (isDeployed) {
     if (parsed.SESSION_SECRET === 'dev-only-insecure-secret-change-me') {
-      throw new Error('SESSION_SECRET must be set in production');
+      throw new Error(
+        'SESSION_SECRET is still the built-in development value, which is public in this ' +
+          'repository — anyone could forge a creator session. Set it to 48 random bytes ' +
+          '(openssl rand -base64 48) and redeploy.',
+      );
     }
     if (parsed.ALLOWED_CREATORS.length === 0) {
-      throw new Error('ALLOWED_CREATORS must list at least one email in production');
+      throw new Error(
+        'ALLOWED_CREATORS is empty, so nobody can create a poll. Set it to a comma-separated ' +
+          'list of the addresses allowed to convene votes.',
+      );
     }
   }
 
@@ -131,8 +203,11 @@ function build(env: NodeJS.ProcessEnv = process.env): Config {
     ...parsed,
     SMTP_HOST: normalizeSmtpHost(parsed.SMTP_HOST),
     isProduction,
-    // §6.3 — production logs at warn.
-    logLevel: parsed.LOG_LEVEL ?? (isProduction ? 'warn' : 'info'),
+    isDeployed,
+    bindHost: resolveBindHost(parsed.HOST, localInterfaceAddresses()).host,
+    dataIsEphemeral: !path.isAbsolute(parsed.DATA_DIR),
+    // §6.3 — a deployment logs at warn, whatever NODE_ENV says.
+    logLevel: parsed.LOG_LEVEL ?? (isDeployed ? 'warn' : 'info'),
     emailDryRun: dryRun,
     smtpSecure: resolveSmtpSecure(parsed.SMTP_PORT, parsed.SMTP_SECURE),
   };

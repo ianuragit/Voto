@@ -16,7 +16,7 @@ export function issueCsrf(reply: FastifyReply): string {
   reply.setCookie(COOKIE, value, {
     httpOnly: true,
     sameSite: 'lax',
-    secure: config.isProduction,
+    secure: config.isDeployed, // a real deployment is HTTPS, whatever NODE_ENV says
     path: '/',
     maxAge: 3600,
   });

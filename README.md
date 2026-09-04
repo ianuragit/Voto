@@ -269,6 +269,7 @@ that bite:
 | `535` / `EAUTH` | Credential refused | `SMTP_USER` is the literal string `emailapikey`; `SMTP_PASSWORD` is the Mail Agent **SMTP** token, not the Send Mail API token |
 | `ECONNREFUSED` / `ETIMEDOUT` | Relay unreachable | Check `SMTP_HOST`/`SMTP_PORT`, and that the platform permits outbound SMTP on that port |
 | `ESOCKET` | TLS negotiation failed | `SMTP_SECURE` must match the port — implicit TLS on 465 only. Leave it unset and Voto derives it |
+| `ETIMEDOUT` on every port | The platform is filtering outbound SMTP | `check:email` probes 587/465/2525/25 and says so. Ask the platform to unblock it, move to a port it allows, or send over the provider's HTTPS API instead — HTTPS is not filtered |
 | `550` / `EENVELOPE` | Sender refused | `MAIL_FROM_ADDRESS` must be on a verified sending domain — back to step 0 |
 
 The service also runs this check itself at boot and logs `smtp ready`, or an error naming the

@@ -12,7 +12,31 @@
  * It never prints the password, and it prints a recipient only if you passed
  * one on the command line yourself.
  */
+import net from 'node:net';
 import nodemailer from 'nodemailer';
+
+/**
+ * Can this container open a TCP connection to the relay at all?
+ *
+ * A timeout on every SMTP port, while HTTPS to the same provider works, means
+ * the platform is filtering outbound SMTP — which no amount of credential
+ * fixing will solve. Distinguishing that from a wrong password is the
+ * difference between a one-line fix and an afternoon.
+ */
+function probe(host, port, ms = 6000) {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    const done = (result) => {
+      socket.destroy();
+      resolve(result);
+    };
+    socket.setTimeout(ms);
+    socket.once('connect', () => done('open'));
+    socket.once('timeout', () => done('timed out'));
+    socket.once('error', (err) => done(err.code ?? 'error'));
+    socket.connect(port, host);
+  });
+}
 
 const host = (process.env.SMTP_HOST ?? '')
   .trim()
@@ -64,6 +88,39 @@ const transporter = nodemailer.createTransport({
   logger: false,
 });
 
+async function reportEgress() {
+  console.log(`\nChecking whether this container can reach ${host} at all:`);
+  const results = [];
+  for (const p of [587, 465, 2525, 25]) {
+    const state = await probe(host, p);
+    results.push([p, state]);
+    console.log(`  ${host}:${p} — ${state}`);
+  }
+  const reachable = results.filter(([, state]) => state === 'open').map(([p]) => p);
+
+  if (reachable.length === 0) {
+    console.log(
+      '\n→ No SMTP port is reachable from here. That is the platform blocking outbound\n' +
+        '  SMTP, not a Voto or credential problem — many hosts filter these ports to stop\n' +
+        '  spam. Options, in order of least work:\n' +
+        '    1. Ask the platform to unblock outbound SMTP for this service.\n' +
+        '    2. Use a relay that offers a non-standard port the platform allows (2525).\n' +
+        '    3. Send over the provider HTTPS API instead — HTTPS is not filtered.\n' +
+        '       (Voto sent that way until this deployment moved to SMTP; ask for it back.)',
+    );
+  } else if (!reachable.includes(port)) {
+    console.log(
+      `\n→ Port ${port} is not reachable but ${reachable.join(', ')} is. Set SMTP_PORT=${reachable[0]}` +
+        `${reachable[0] === 465 ? ' (and leave SMTP_SECURE unset — 465 implies TLS)' : ''}.`,
+    );
+  } else {
+    console.log(
+      `\n→ Port ${port} is reachable, so the relay is not the problem — the failure above is` +
+        ' the credential or the TLS settings.',
+    );
+  }
+}
+
 const explain = (err) => {
   const code = err?.responseCode;
   const hint =
@@ -85,6 +142,7 @@ try {
   console.log('\n✓ Relay reachable and credential accepted.');
 } catch (err) {
   explain(err);
+  await reportEgress();
   transporter.close();
   process.exit(1);
 }

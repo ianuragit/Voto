@@ -1,4 +1,4 @@
-import { config } from './config.js';
+import { config, localInterfaceAddresses, resolveBindHost } from './config.js';
 import { log } from './logging.js';
 import { buildServer } from './server.js';
 import { startSweeper, sweepExpiredPolls } from './services/lifecycle.js';
@@ -48,7 +48,8 @@ function reportFatal(err: unknown): void {
 
   process.stderr.write(
     `\nVOTO FAILED TO START — stage: ${failed}\n${masked}\n\n` +
-      `  DATA_DIR=${config.DATA_DIR} PORT=${config.PORT} NODE_ENV=${config.NODE_ENV}\n` +
+      `  DATA_DIR=${config.DATA_DIR} PORT=${config.PORT} HOST=${config.HOST} ` +
+      `NODE_ENV=${config.NODE_ENV} deployed=${config.isDeployed}\n` +
       `  If this names a database or path, check the Railway volume is mounted at DATA_DIR.\n` +
       `  If it names SMTP, run: npm run check:email\n\n`,
   );
@@ -64,11 +65,37 @@ async function main(): Promise<void> {
   await stage('open databases and sweep deadlines', () => sweepExpiredPolls());
   const sweeper = startSweeper();
 
-  await stage('listen', () => app.listen({ port: config.PORT, host: config.HOST }));
+  // §11 — a HOST this machine cannot bind is refused before listen(), rather
+  // than becoming EADDRNOTAVAIL and a crash loop.
+  const bind = resolveBindHost(config.HOST, localInterfaceAddresses());
+  if (bind.rejected) {
+    log.error('HOST is not an address this machine holds — binding every interface instead', {
+      rejected: bind.rejected,
+      bound: bind.host,
+    });
+  }
+  await stage('listen', () => app.listen({ port: config.PORT, host: bind.host }));
 
-  // Deliberately at warn: production runs at warn, and "the service is up" is
-  // the one line worth having in a deploy log.
-  log.warn('voto listening', { port: config.PORT, env: config.NODE_ENV });
+  // Deliberately at warn: a deployment logs at warn, and "the service is up"
+  // with what it is actually running on is the line worth having in a deploy log.
+  log.warn('voto listening', {
+    port: config.PORT,
+    host: bind.host,
+    deployed: config.isDeployed,
+    env: config.NODE_ENV,
+    data_dir: config.DATA_DIR,
+  });
+
+  // A relative DATA_DIR is container-local: every redeploy silently destroys
+  // every poll. Voto's whole point is that a decision is recorded properly, so
+  // this is shouted rather than mentioned.
+  if (config.isDeployed && config.dataIsEphemeral) {
+    log.error(
+      'DATA_DIR is a relative path, so the databases are NOT on the mounted volume — ' +
+        'every redeploy will destroy every poll. Set DATA_DIR to the volume mount path.',
+      { data_dir: config.DATA_DIR },
+    );
+  }
 
   // Check the relay once at boot. A poll needs 100% turnout, so an invite that
   // cannot be delivered means the poll cannot complete — that deserves a loud

@@ -52,7 +52,7 @@ export function setSession(reply: FastifyReply, email: string): void {
     {
       httpOnly: true,
       sameSite: 'lax',
-      secure: config.isProduction,
+      secure: config.isDeployed, // a real deployment is HTTPS, whatever NODE_ENV says
       path: '/',
       maxAge: SESSION_TTL_MS / 1000,
     },
